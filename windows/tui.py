@@ -17,6 +17,11 @@ Prinsip:
   - Tabel jadwal hanya berubah visual saat status berubah.
   - Countdown timer mengisi jeda antar-scan.
   - Ring buffer log 15 entri, tidak scroll tak terbatas.
+  - Tidak ada yang terpotong: dashboard yang lebih tinggi dari jendela
+    digambar sebagai viewport yang bisa di-scroll (panah, PgUp/PgDn,
+    Home/End, roda mouse / swipe di terminal yang mendukung).
+  - Flex: padding, banner, kolom tabel, dan tinggi panel log menyesuaikan
+    ukuran jendela saat itu juga.
 
 Catatan Windows:
   - VT/ANSI diaktifkan lewat kernel32.SetConsoleMode supaya warna & alternate
@@ -29,20 +34,24 @@ from __future__ import annotations  # anotasi jadi lazy -> tui.py tetap bisa
 # di-import walau `rich` belum terpasang (nama Panel/Group/Live baru dipakai
 # saat dashboard benar-benar digambar, bukan saat class didefinisikan).
 
+import atexit
 import os
+import re
 import shutil
 import sys
 import time
 from collections import deque
 from datetime import datetime
-from threading import RLock
+from threading import Event, RLock, Thread
 
 try:
     from rich.align import Align
-    from rich.box import ASCII as BOX_ASCII, ROUNDED as BOX_ROUNDED
+    from rich.box import ASCII as BOX_ASCII, ROUNDED as BOX_ROUNDED, SIMPLE_HEAD
     from rich.console import Console, Group
     from rich.live import Live
     from rich.panel import Panel
+    from rich.segment import Segment
+    from rich.style import Style
     from rich.table import Table
     from rich.text import Text
 
@@ -202,6 +211,154 @@ def term_width(default: int = 80) -> int:
 
 
 # ---------------------------------------------------------------
+# Input keyboard untuk scroll
+# ---------------------------------------------------------------
+# Escape sequence terminal (Linux / Termux / Windows Terminal) -> aksi scroll.
+# Roda mouse dan swipe Termux di alternate screen juga dikirim terminal
+# sebagai panah atas/bawah, jadi ikut tertangkap di sini.
+SCROLL_KEYS = {
+    "\x1b[A": "up", "\x1bOA": "up", "k": "up",
+    "\x1b[B": "down", "\x1bOB": "down", "j": "down",
+    "\x1b[5~": "pgup", "b": "pgup",
+    "\x1b[6~": "pgdn", " ": "pgdn",
+    "\x1b[H": "home", "\x1bOH": "home", "\x1b[1~": "home", "\x1b[7~": "home",
+    "g": "home",
+    "\x1b[F": "end", "\x1bOF": "end", "\x1b[4~": "end", "\x1b[8~": "end",
+    "G": "end",
+}
+# msvcrt.getwch(): tombol khusus datang sebagai '\x00'/'\xe0' + kode ini.
+_WIN_SCAN_KEYS = {"H": "up", "P": "down", "I": "pgup", "Q": "pgdn",
+                  "G": "home", "O": "end"}
+_ESC_SEQ = re.compile(r"\x1b(?:\[[0-9;?]*[@-~]|O[@-~])")
+_ESC_PARTIAL = re.compile(r"\x1b(?:\[[0-9;?]*|O)?")
+
+
+def parse_keys(buf: str):
+    """Pecah input mentah terminal jadi daftar aksi scroll.
+
+    Return (aksi, sisa). `sisa` = escape sequence yang belum lengkap (misal
+    '\\x1b[5' tanpa '~'), disimpan sampai potongan berikutnya terbaca."""
+    keys = []
+    while buf:
+        if buf[0] != "\x1b":
+            if buf[0] in SCROLL_KEYS:
+                keys.append(SCROLL_KEYS[buf[0]])
+            buf = buf[1:]
+            continue
+        m = _ESC_SEQ.match(buf)
+        if m:
+            if m.group() in SCROLL_KEYS:
+                keys.append(SCROLL_KEYS[m.group()])
+            buf = buf[m.end():]
+        elif _ESC_PARTIAL.fullmatch(buf):
+            break
+        else:
+            buf = buf[1:]  # ESC tunggal / sequence asing: buang ESC-nya
+    return keys, buf
+
+
+class _KeyReader:
+    """Baca tombol scroll di thread latar, tanpa perlu menekan Enter.
+
+    POSIX (Linux/Termux): stdin dipindah ke mode cbreak (tanpa echo, tanpa
+    buffer baris) lalu dikembalikan saat stop() / exit. Ctrl+C tetap jadi
+    SIGINT seperti biasa. Windows: msvcrt, mode console tidak diubah."""
+
+    def __init__(self, on_key):
+        self._on_key = on_key
+        self._stop = Event()
+        self._thread = None
+        self._fd = None
+        self._saved = None
+        self.active = False
+
+    def start(self):
+        try:
+            if not sys.stdin or not sys.stdin.isatty():
+                return
+            if os.name == "nt":
+                import msvcrt  # noqa: F401
+                target = self._run_windows
+            else:
+                import termios
+                import tty
+
+                self._fd = sys.stdin.fileno()
+                self._saved = termios.tcgetattr(self._fd)
+                tty.setcbreak(self._fd)
+                atexit.register(self._restore)
+                target = self._run_posix
+        except Exception:
+            self._restore()
+            return
+        self.active = True
+        self._thread = Thread(target=target, name="tui-keys", daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=0.5)
+            self._thread = None
+        self._restore()
+        self.active = False
+
+    def _restore(self):
+        if self._saved is None:
+            return
+        try:
+            import termios
+
+            termios.tcsetattr(self._fd, termios.TCSADRAIN, self._saved)
+        except Exception:
+            pass
+        self._saved = None
+
+    def _emit(self, keys):
+        for key in keys:
+            try:
+                self._on_key(key)
+            except Exception:
+                pass
+
+    def _run_posix(self):
+        import select
+
+        buf = ""
+        while not self._stop.is_set():
+            try:
+                ready, _, _ = select.select([self._fd], [], [], 0.1)
+                if not ready:
+                    buf = ""  # sisa escape yang tidak pernah lengkap
+                    continue
+                data = os.read(self._fd, 64)
+            except Exception:
+                return
+            if not data:
+                return  # EOF
+            keys, buf = parse_keys(buf + data.decode("utf-8", "ignore"))
+            self._emit(keys)
+
+    def _run_windows(self):
+        import msvcrt
+
+        while not self._stop.is_set():
+            try:
+                if not msvcrt.kbhit():
+                    self._stop.wait(0.05)
+                    continue
+                ch = msvcrt.getwch()
+                if ch in ("\x00", "\xe0"):
+                    key = _WIN_SCAN_KEYS.get(msvcrt.getwch())
+                else:
+                    key = SCROLL_KEYS.get(ch)
+            except Exception:
+                return
+            if key:
+                self._emit([key])
+
+
+# ---------------------------------------------------------------
 # ASCII Art Header
 # ---------------------------------------------------------------
 ASCII_BANNER = r"""
@@ -319,6 +476,17 @@ def nama_dosen(teks: str) -> str:
     return t
 
 
+_JAM_RANGE = re.compile(
+    r"(\d{1,2}:\d{2})(?::\d{2})?\s*(?:s\.?\s*d\.?|-)\s*(\d{1,2}:\d{2})(?::\d{2})?")
+
+
+def jam_ringkas(jam: str) -> str:
+    """'07:00:00 s.d. 09:30:00' -> '07:00-09:30' (untuk kolom sempit).
+    Format lain dikembalikan apa adanya."""
+    m = _JAM_RANGE.search(jam or "")
+    return f"{m.group(1)}-{m.group(2)}" if m else jam
+
+
 def _split_sig(sig: str):
     """Pecah signature engine jadi (nama_mk, dosen, jam).
 
@@ -356,7 +524,23 @@ class _LiveView:
         self._dash = dashboard
 
     def __rich_console__(self, console, options):
-        yield self._dash._build_layout()
+        yield self._dash._build_layout(options)
+
+
+class _Lines:
+    """Baris-baris yang sudah dirender (isi viewport) sebagai renderable."""
+
+    __slots__ = ("_lines",)
+
+    def __init__(self, lines):
+        self._lines = lines
+
+    def __rich_console__(self, console, options):
+        new_line = Segment.line()
+        for i, line in enumerate(self._lines):
+            if i:
+                yield new_line
+            yield from line
 
 
 class Dashboard:
@@ -387,6 +571,15 @@ class Dashboard:
         # barisnya tetap SUDAH ABSEN walau scan berikutnya belum ikut berubah.
         self._absen_sukses = set()
 
+        # Viewport: kalau dashboard lebih tinggi dari jendela, yang digambar
+        # hanya potongan setinggi layar mulai baris ke-_scroll. Sisanya
+        # dicapai lewat scroll, bukan dipotong.
+        self._scroll = 0
+        self._max_scroll = 0
+        self._page = 10
+        self._follow = False       # menempel di dasar seperti `tail -f`
+        self._full_render = False  # frame terakhir tanpa alt screen: utuh
+
         # Rich objects
         if not self._plain:
             _force_utf8_stdout()
@@ -396,6 +589,7 @@ class Dashboard:
             self._last_fit = 0.0
             self._console = Console()
             self._live = None
+            self._keys = _KeyReader(self._on_key)
             # conhost lama: border unicode sering pecah -> pakai box ASCII
             self._box = BOX_ASCII if getattr(self._console, "legacy_windows", False) else BOX_ROUNDED
 
@@ -516,6 +710,14 @@ class Dashboard:
         if self._plain:
             print_ascii_banner()
             return
+        if self._alt_screen and not self._console.legacy_windows:
+            # Alternate scroll mode (DECSET 1007): roda mouse di alternate
+            # screen dikirim terminal sebagai panah atas/bawah, jadi ikut
+            # men-scroll dashboard. Terminal yang tidak kenal mengabaikannya.
+            # Sengaja tidak dimatikan saat keluar: di banyak terminal (VTE,
+            # Konsole) perilaku ini memang bawaan.
+            sys.stdout.write("\x1b[?1007h")
+            sys.stdout.flush()
         # screen=True mengaktifkan Alternate Screen Buffer (seperti vim/htop):
         # layar bersih, riwayat shell tidak ikut ter-scroll.
         # _LiveView bikin layout dibangun ulang tiap frame -> responsif saat
@@ -527,11 +729,19 @@ class Dashboard:
             screen=self._alt_screen,
         )
         self._live.start()
+        self._keys.start()
 
     def stop(self):
         """Hentikan live dashboard."""
+        keys = getattr(self, "_keys", None)
+        if keys is not None:
+            keys.stop()
         live = getattr(self, "_live", None)
         if live:
+            # Tanpa alternate screen frame terakhir tertinggal di layar, jadi
+            # digambar utuh (bukan potongan viewport) supaya seluruhnya tetap
+            # bisa dibaca lewat scroll terminal.
+            self._full_render = True
             try:
                 live.stop()
             except Exception:
@@ -580,21 +790,39 @@ class Dashboard:
         except Exception:
             pass  # Jangan crash karena render error
 
-    def _build_banner(self) -> Group:
-        """Render banner ASCII art di dalam alternate screen buffer."""
-        size = self._console.size
-        if size.height >= 22 and size.width >= BANNER_WIDTH + 8:
-            head = Text(ASCII_BANNER.strip("\n"), style="bold cyan")
-        else:
-            head = Text(COMPACT_TITLE, style="bold cyan")
+    def _on_key(self, key: str):
+        """Geser viewport sesuai tombol dari _KeyReader."""
+        with self._lock:
+            step = {"up": -1, "down": 1, "pgup": -self._page,
+                    "pgdn": self._page}.get(key, 0)
+            if key == "home":
+                pos = 0
+            elif key == "end":
+                pos = self._max_scroll
+            else:
+                pos = self._scroll + step
+            self._scroll = max(0, min(self._max_scroll, pos))
+            # Berhenti di dasar = ikuti konten, log baru tetap terlihat.
+            self._follow = 0 < self._max_scroll == self._scroll
+        self._refresh()
+
+    def _build_banner(self, big: bool = True) -> Group:
+        """Banner ASCII art besar, atau judul ringkas satu baris."""
+        head = (Text(ASCII_BANNER.strip("\n"), style="bold cyan") if big
+                else Text(COMPACT_TITLE, style="bold cyan"))
         return Group(
             Align.center(head),
             Align.center(Text(SUBTITLE, style="dim white")),
             Text(""),
         )
 
-    def _build_layout(self) -> Panel:
-        """Render full dashboard sebagai satu Panel."""
+    def _build_layout(self, options=None) -> Panel:
+        """Render full dashboard sebagai satu Panel setinggi jendela.
+
+        Isi dirender utuh dulu, lalu diambil potongan setinggi layar mulai
+        baris _scroll. Kalau isinya lebih tinggi dari jendela, muncul scrollbar
+        di kanan dan petunjuk tombol di bingkai bawah -- tidak ada yang
+        terpotong."""
         # Kalau user me-maximize jendela di tengah jalan, buffer console perlu
         # ikut dilebarkan. Dicek paling sering sekali per detik supaya tidak
         # membebani loop render.
@@ -603,27 +831,132 @@ class Dashboard:
             self._last_fit = now
             fit_console_width()
 
-        parts = [
-            self._build_banner(),
-            self._build_status_bar(),
-            Text(""),
-            self._build_jadwal_panel(),
-            Text(""),
-            self._build_log_panel(),
-        ]
+        options = options or self._console.options
+        width = options.max_width
+        height = options.height or options.size.height
+        # Jendela lega: bingkai berjarak. Sempit/pendek: jaraknya dipangkas
+        # supaya ruang dipakai untuk isi.
+        roomy = width >= 80 and height >= 30
+        pad_y, pad_x = (1, 2) if roomy else (0, 1)
+        inner_w = max(10, width - 2 - 2 * pad_x)
+        view_h = max(1, height - 2 - 2 * pad_y)
+        full = self._full_render
+        body = self._render_body(options, inner_w, None if full else view_h)
+        total = len(body)
+
+        with self._lock:
+            if full or total <= view_h:
+                self._scroll = self._max_scroll = 0
+                visible, start = body, 0
+            else:
+                self._max_scroll = total - view_h
+                self._page = max(1, view_h - 1)
+                if self._follow:
+                    self._scroll = self._max_scroll
+                self._scroll = min(self._scroll, self._max_scroll)
+                start = self._scroll
+                visible = body[start:start + view_h]
+            cycle = self._cycle_count
+
+        scrolling = len(visible) < total
+        padding = (pad_y, pad_x, pad_y, pad_x)
+        if scrolling:
+            # Scrollbar mengisi kolom terakhir jarak kanan, menempel ke
+            # bingkai; lebar isi tidak berubah.
+            bar = self._scrollbar(total, view_h, start)
+            gap = Segment(" " * (pad_x - 1))
+            visible = [line + [gap, seg] for line, seg in zip(visible, bar)]
+            padding = (pad_y, 0, pad_y, pad_x)
+        # Alt screen: bingkai selalu setinggi jendela. Layar biasa: setinggi
+        # isinya saja, kecuali isinya tidak muat.
+        fixed = scrolling or (self._alt_screen and not full)
         return Panel(
-            Group(*parts),
+            _Lines(visible),
             title="[bold]POLBAN AUTO ABSEN[/bold]",
-            subtitle=(f"[dim]{VERSION} {platform_label().lower()} | "
-                      f"siklus #{self._cycle_count} | Ctrl+C untuk keluar[/dim]"),
+            subtitle=self._footer(width, cycle, start, len(visible), total),
             border_style="bright_blue",
             box=self._box,
-            padding=(1, 2),
+            padding=padding,
             expand=True,
+            height=height if fixed else None,
         )
 
-    def _build_status_bar(self) -> Panel:
-        """Panel identitas + status. Label dipendekkan di terminal sempit."""
+    def _render_body(self, options, width: int, view_h):
+        """Render semua bagian dashboard jadi daftar baris selebar `width`.
+
+        Tinggi jendela ikut menentukan isi (flex):
+          - banner ASCII besar hanya dipakai kalau semuanya tetap muat tanpa
+            scroll; kalau tidak, cukup judul ringkas;
+          - sisa tinggi diberikan ke panel log, jadi bingkai selalu penuh.
+        view_h None = render utuh tanpa batas tinggi."""
+        opts = options.update(width=width, height=None)
+
+        def render(renderable):
+            return self._console.render_lines(renderable, opts, pad=True)
+
+        head = render(self._build_banner(big=False))
+        status = render(self._build_status_bar(width))
+        jadwal = render(self._build_jadwal_panel(width))
+        log = render(self._build_log_panel(width))
+        spare = 0
+        if view_h is not None:
+            spare = view_h - (len(head) + len(status) + len(jadwal)
+                              + len(log) + 2)
+        if width >= BANNER_WIDTH and (view_h is None or spare > 0):
+            big = render(self._build_banner(big=True))
+            extra = len(big) - len(head)
+            if view_h is None or extra <= spare:
+                head, spare = big, spare - extra
+        if spare > 0 and self._alt_screen:
+            log = render(self._build_log_panel(width, height=len(log) + spare))
+        gap = [Segment(" " * width)]
+        return head + status + [gap] + jadwal + [gap] + log
+
+    def _scrollbar(self, total: int, view: int, start: int) -> list:
+        """Satu Segment per baris viewport: jempol di posisi yang terlihat."""
+        thumb = max(1, round(view * view / total))
+        top = round(start * (view - thumb) / max(1, total - view))
+        ascii_only = self._box is BOX_ASCII
+        on = Segment("#" if ascii_only else "█", Style(color="bright_blue"))
+        off = Segment("|" if ascii_only else "│", Style(dim=True))
+        return [on if top <= i < top + thumb else off for i in range(view)]
+
+    def _footer(self, width: int, cycle: int, start: int, shown: int,
+                total: int):
+        """Teks bingkai bawah: versi terpanjang yang masih muat."""
+        if shown < total:
+            pos = f"{start + 1}-{start + shown}/{total}"
+            if self._keys.active:
+                arrows = "Up/Dn" if self._box is BOX_ASCII else "↑↓"
+                pilihan = [
+                    f"siklus #{cycle} | {arrows} PgUp PgDn Home End: "
+                    f"scroll {pos} | Ctrl+C keluar",
+                    f"siklus #{cycle} | {arrows} PgUp PgDn: scroll {pos}",
+                    f"{arrows} scroll {pos}",
+                    pos,
+                ]
+            else:
+                pilihan = [f"siklus #{cycle} | baris {pos} | Ctrl+C keluar",
+                           pos]
+        else:
+            pilihan = [
+                f"{VERSION} {platform_label().lower()} | siklus #{cycle} | "
+                f"Ctrl+C untuk keluar",
+                f"siklus #{cycle} | Ctrl+C keluar",
+                f"siklus #{cycle}",
+            ]
+        for teks in pilihan:
+            if len(teks) + 6 <= width:
+                return f"[dim]{teks}[/dim]"
+        return None
+
+    def _build_status_bar(self, width: int) -> Panel:
+        """Panel identitas + status.
+
+        Disusun sebagai grid label | : | nilai, jadi nilai panjang yang
+        terpaksa patah tetap menjorok rapi di kolomnya. Engine, Interval,
+        Next scan, dan Absen digabung satu baris selama muat, lalu dipecah
+        bertahap kalau jendelanya sempit."""
         with self._lock:
             info = dict(self._user_info or {})
             auth = self._auth_status
@@ -640,76 +973,89 @@ class Dashboard:
 
         countdown_str = f"{countdown // 60:02d}:{countdown % 60:02d}"
         tgl = datetime.now().strftime("%A, %d %B %Y")
-        width = self._console.size.width
 
-        lines = Text()
-        lines.append("  Nama       : ", style="dim")
-        lines.append(f"{nama}\n", style="bold")
-        lines.append("  NIM        : ", style="dim")
-        lines.append(f"{nim}\n")
+        pad = 2 if width >= 50 else 1
+        # Lebar kolom nilai = isi panel - label terpanjang ('Hasil Scan') - ':'
+        # beserta jaraknya.
+        value_w = width - 2 - 2 * pad - 13
+
+        grid = Table.grid(padding=(0, 1))
+        grid.add_column(style="dim", no_wrap=True)
+        grid.add_column(style="dim", no_wrap=True)
+        grid.add_column(overflow="fold")
+
+        def row(label, value, style=""):
+            if not isinstance(value, Text):
+                value = Text(str(value), style=style)
+            grid.add_row(label, ":", value)
+
+        row("Nama", nama, "bold")
+        row("NIM", nim)
         if jurusan:
-            lines.append("  Jurusan    : ", style="dim")
-            lines.append(f"{jurusan}\n")
-        lines.append("  Tanggal    : ", style="dim")
-        lines.append(f"{tgl}\n")
-        lines.append("\n")
-        lines.append("  Status     : ", style="dim")
-        lines.append(f"{auth}\n", style=auth_style)
-        # Ringkasan scan cukup panjang: di jendela sempit ditaruh di baris
-        # sendiri (menjorok) supaya tidak patah di tengah kalimat.
-        if width < 86:
-            lines.append("  Hasil Scan :\n     ", style="dim")
-            lines.append(f"{last_scan}\n")
+            row("Jurusan", jurusan)
+        row("Tanggal", tgl)
+        grid.add_row("", "", "")
+        row("Status", auth, auth_style)
+        row("Hasil Scan", last_scan)
+
+        mesin = Text.assemble(engine, "   ", ("Interval : ", "dim"),
+                              f"{interval}s", "   ", ("Next scan : ", "dim"),
+                              (countdown_str, "bold cyan"))
+        absen = Text.assemble((f"{ok} berhasil", "green"), (" / ", "dim"),
+                              (f"{fail} gagal", "red"))
+        if mesin.cell_len + 11 + absen.cell_len <= value_w:
+            row("Engine", Text.assemble(mesin, "   ", ("Absen : ", "dim"), absen))
+        elif mesin.cell_len <= value_w:
+            row("Engine", mesin)
+            row("Absen", absen)
         else:
-            lines.append("  Hasil Scan : ", style="dim")
-            lines.append(f"{last_scan}\n")
-        # Baris terakhir dipecah dua kalau jendelanya sempit, supaya tidak
-        # membungkus di tengah angka.
-        lines.append("  Engine     : ", style="dim")
-        lines.append(f"{engine}   ")
-        lines.append("Interval : ", style="dim")
-        lines.append(f"{interval}s   ")
-        lines.append("Next scan : ", style="dim")
-        lines.append(f"{countdown_str}", style="bold cyan")
-        lines.append("\n  Absen      : " if width < 86 else "   Absen : ", style="dim")
-        lines.append(f"{ok} berhasil", style="green")
-        lines.append(" / ", style="dim")
-        lines.append(f"{fail} gagal", style="red")
+            row("Engine", engine)
+            row("Interval", f"{interval}s")
+            row("Next scan", countdown_str, "bold cyan")
+            row("Absen", absen)
 
-        return Panel(lines, title="[bold]Identitas[/bold]",
-                     border_style="dim", box=self._box)
+        return Panel(grid, title="[bold]Identitas[/bold]",
+                     border_style="dim", box=self._box, padding=(0, pad))
 
-    def _build_jadwal_panel(self) -> Panel:
+    def _build_jadwal_panel(self, width: int) -> Panel:
         """Tabel jadwal matkul hari ini.
 
         Isi tabel (matkul, jam, dosen) memakai warna teks normal -- BUKAN
         'dim' -- supaya sama terbacanya; dim di terminal gelap jadi abu-abu
         yang nyaris tenggelam ke latar.
 
-        Tiga tingkat, menyesuaikan lebar jendela saat itu juga:
-          >= 96 kolom : No | Mata Kuliah | Jam | Status | Keterangan
-          >= 62 kolom : Jam pindah ke bawah nama matkul
-          <  62 kolom : Keterangan ikut pindah ke bawah nama matkul
+        Empat tingkat, menyesuaikan lebar isi dashboard saat itu juga:
+          >= 100 kolom : No | Mata Kuliah | Jam | Status | Dosen
+          >=  56 kolom : Jam (diringkas HH:MM-HH:MM) pindah ke bawah nama
+          >=  44 kolom : Dosen ikut pindah ke bawah nama matkul
+          <   44 kolom : Status juga pindah ke bawah nama (layar HP)
+        Kata yang lebih panjang dari kolomnya dipatah (fold), tidak dipotong.
         """
-        width = self._console.size.width
-        narrow = width < 96
-        tiny = width < 62
+        narrow = width < 100
+        tiny = width < 56
+        micro = width < 44
+        # Tabel sudah di dalam panel berbingkai: di jendela sempit bingkai
+        # kedua dibuang supaya kolom nama tidak tergencet.
+        slim = narrow and self._box is not BOX_ASCII
 
         table = Table(show_header=True, header_style="bold", expand=True,
-                      show_lines=False, pad_edge=True, box=self._box)
+                      show_lines=False, pad_edge=not tiny,
+                      box=SIMPLE_HEAD if slim else self._box, show_edge=not slim)
         table.add_column("No", style="dim", width=3, justify="right")
-        table.add_column("Mata Kuliah", ratio=3, min_width=14)
+        table.add_column("Mata Kuliah", ratio=3, min_width=14, overflow="fold")
         if not narrow:
             # 'HH:MM:SS s.d. HH:MM:SS' = 22 karakter: dikunci supaya tidak
             # dipatahkan jadi dua baris padahal ruangnya cukup.
             table.add_column("Jam", width=22)
-        # 'BELUM WAKTUNYA' = 14 karakter. Lebar DIKUNCI (bukan ratio) supaya
-        # tidak pernah terpotong jadi 'SUDAH A...' di terminal sempit.
-        table.add_column("Status", width=14, justify="center", no_wrap=True)
+        if not micro:
+            # 'BELUM WAKTUNYA' = 14 karakter. Lebar DIKUNCI (bukan ratio)
+            # supaya tidak pernah terpotong jadi 'SUDAH A...'.
+            table.add_column("Status", width=14, justify="center", no_wrap=True)
         if not tiny:
-            table.add_column("Dosen", ratio=3, min_width=14)
+            table.add_column("Dosen", ratio=3, min_width=14, overflow="fold")
 
-        n_col = 3 + (0 if narrow else 1) + (0 if tiny else 1)
+        n_col = (2 + (0 if narrow else 1) + (0 if micro else 1)
+                 + (0 if tiny else 1))
 
         with self._lock:
             jadwal = list(self._jadwal)
@@ -723,50 +1069,55 @@ class Dashboard:
                               style=STATUS_STYLES.get(mk.status, ""))
                 if narrow:
                     nama = Text(mk.nama)
+                    if micro:
+                        nama.append("\n")
+                        nama.append_text(status)
                     if mk.jam:
-                        nama.append(f"\n{mk.jam}")
+                        nama.append(f"\n{jam_ringkas(mk.jam)}")
                     if tiny and mk.dosen:
                         nama.append(f"\n{mk.dosen}")
-                    row = [str(i), nama, status]
+                    row = [str(i), nama] + ([] if micro else [status])
                     if not tiny:
-                        row.append(mk.dosen or "-")
+                        row.append(Text(mk.dosen or "-"))
                     table.add_row(*row)
                 else:
-                    table.add_row(str(i), mk.nama, mk.jam, status,
-                                  mk.dosen or "-")
+                    table.add_row(str(i), Text(mk.nama), Text(mk.jam), status,
+                                  Text(mk.dosen or "-"))
 
         return Panel(table, title="[bold]Jadwal Hari Ini[/bold]",
-                     border_style="dim", box=self._box)
+                     border_style="dim", box=self._box,
+                     padding=(0, 0) if tiny else (0, 1))
 
-    def _build_log_panel(self) -> Panel:
-        """Ring buffer activity log.
+    def _build_log_panel(self, width: int, height: int = None) -> Panel:
+        """Ring buffer activity log -- semua entri (maks MAX_LOG) ditampilkan;
+        kalau tidak muat, dashboard yang di-scroll.
 
-        Jumlah baris menyesuaikan tinggi jendela: di terminal pendek hanya
-        beberapa entri terakhir yang ditampilkan supaya panel lain tidak
-        terdorong keluar layar."""
+        Grid waktu | tag | pesan: pesan panjang yang patah tetap menjorok di
+        kolom pesan. `height` diisi _render_body supaya panel ini memenuhi
+        sisa tinggi jendela."""
         with self._lock:
             entries = list(self._log)
 
-        height = self._console.size.height
-        # Sisakan ruang untuk banner + identitas + tabel jadwal.
-        muat = max(3, min(len(entries), height - 22))
-        shown = entries[-muat:]
-
-        if not shown:
-            content = Text("  Belum ada aktivitas.", style="dim")
+        pad = 2 if width >= 50 else 1
+        if not entries:
+            content = Text("Belum ada aktivitas.", style="dim")
         else:
-            content = Text()
-            for entry in shown:
-                content.append(f"  {entry.timestamp}  ", style="dim")
-                content.append(f"{LEVEL_TAGS.get(entry.level, '[--]')} ",
-                               style=LEVEL_STYLES.get(entry.level, ""))
-                content.append(f"[{entry.code}] ", style="bold")
-                content.append(f"{entry.message}\n")
+            content = Table.grid(padding=(0, 1))
+            content.add_column(style="dim", no_wrap=True)
+            content.add_column(no_wrap=True)
+            content.add_column(overflow="fold")
+            for entry in entries:
+                content.add_row(
+                    entry.timestamp,
+                    Text(LEVEL_TAGS.get(entry.level, "[--]"),
+                         style=LEVEL_STYLES.get(entry.level, "")),
+                    Text.assemble((f"[{entry.code}] ", "bold"), entry.message),
+                )
 
-        judul = (f"[bold]Log Aktivitas ({len(shown)} terakhir)[/bold]"
-                 if len(shown) == len(entries) else
-                 f"[bold]Log Aktivitas ({len(shown)} dari {len(entries)})[/bold]")
-        return Panel(content, title=judul, border_style="dim", box=self._box)
+        return Panel(content,
+                     title=f"[bold]Log Aktivitas ({len(entries)} terakhir)[/bold]",
+                     border_style="dim", box=self._box, padding=(0, pad),
+                     height=height)
 
 
 # ---------------------------------------------------------------

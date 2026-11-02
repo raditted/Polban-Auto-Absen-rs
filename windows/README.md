@@ -6,7 +6,7 @@ Folder ini **mandiri** — engine `auto_absen.py` + modul UI `tui.py` ada di sin
 
 ## Tampilan
 
-Dashboard digambar di **alternate screen buffer** (seperti `htop`), jadi layar bersih dan tidak meninggalkan scrollback. Panel diperbarui *in-place*, bukan dicetak ulang tiap siklus, dan **ikut menyesuaikan saat jendela diubah ukurannya**: di bawah 96 kolom kolom Jam melipat ke bawah nama matkul, di bawah 62 kolom kolom Dosen ikut melipat, dan jumlah baris log menyesuaikan tinggi jendela.
+Dashboard digambar di **alternate screen buffer** (seperti `htop`), jadi layar bersih dan tidak meninggalkan scrollback. Panel diperbarui *in-place*, bukan dicetak ulang tiap siklus, dan **ikut menyesuaikan saat jendela diubah ukurannya**: di jendela sempit kolom Jam lalu Dosen melipat ke bawah nama matkul, dan panel log mengisi sisa tinggi. Kalau isinya lebih tinggi dari jendela, tidak ada yang dipotong — scroll dengan `↑`/`↓`, `PgUp`/`PgDn`, `Home`/`End`, atau roda mouse (Windows Terminal).
 
 ```
 ┌──────────────────────── POLBAN AUTO ABSEN ─────────────────────────┐

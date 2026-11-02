@@ -61,7 +61,8 @@ Jalankan auto-absen di HP Android **tanpa browser**, hemat baterai, bisa backgro
    bash termux-run.sh
    ```
 
-   Berhenti: `Ctrl+C`. Layar penuh terasa sempit di HP? Jalankan dengan
+   Berhenti: `Ctrl+C`. Dashboard lebih tinggi dari layar HP? Swipe atas/bawah
+   (atau tombol panah di extra-keys) untuk scroll. Masih terasa sempit? Jalankan dengan
    `bash termux-run.sh --no-alt-screen` (dashboard tanpa alternate screen)
    atau `bash termux-run.sh --plain` (log mengalir biasa).
 
