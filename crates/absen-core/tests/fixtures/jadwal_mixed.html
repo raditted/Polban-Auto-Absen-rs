@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="id">
+<head><title>Absensi Perkuliahan</title></head>
+<body>
+  <header class="main-header">
+    <div class="user-header">
+      <span>251511001</span>
+      <span>Budi Santoso</span>
+      <span>D3-Teknik Informatika</span>
+    </div>
+  </header>
+
+  <table id="jadwal" class="table table-bordered">
+    <thead>
+      <tr>
+        <th>No</th><th>Dosen</th><th>Kode MK</th><th>Mata Kuliah</th>
+        <th>TP</th><th>JA</th><th>JB</th><th>Jam</th><th>Aksi</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>1</td>
+        <td>KO078N-Trisna Gelar Abdillah, S.T., M.Kom</td>
+        <td>25IF201</td>
+        <td>Struktur Data</td>
+        <td>T</td>
+        <td>1</td>
+        <td>3</td>
+        <td>07:00:00 s.d. 09:30:00</td>
+        <td>
+          <input type="hidden" id="kls" value="1A">
+          <button type="button" class="btn btn-primary">Absen Awal</button>
+        </td>
+      </tr>
+      <tr>
+        <td>2</td>
+        <td>BD011N-Siti Aminah, M.T.</td>
+        <td>25IF202</td>
+        <td>Basis Data</td>
+        <td>P</td>
+        <td>4</td>
+        <td>6</td>
+        <td>09:30:00 s.d. 12:00:00</td>
+        <td>
+          <input type="hidden" id="kls" value="1B">
+          <a href="#" class="btn btn-info">Klik Absen</a>
+        </td>
+      </tr>
+      <tr>
+        <td>3</td>
+        <td>KO012N-Andi Wijaya</td>
+        <td>25IF203</td>
+        <td>Matematika Diskrit</td>
+        <td>T</td>
+        <td>7</td>
+        <td>8</td>
+        <td>13:00:00 s.d. 14:40:00</td>
+        <td><button type="button" class="btn btn-success">Sudah Absen</button></td>
+      </tr>
+      <tr>
+        <td>4</td>
+        <td>KO015N-Rina Kartika</td>
+        <td>25IF204</td>
+        <td>Bahasa Inggris</td>
+        <td>T</td>
+        <td>9</td>
+        <td>10</td>
+        <td>14:40:00 s.d. 16:20:00</td>
+        <td><button type="button" class="btn btn-warning">Belum Buka</button></td>
+      </tr>
+      <tr>
+        <td>5</td>
+        <td>KO020N-Dedi Kurniawan</td>
+        <td>25IF205</td>
+        <td>Jaringan Komputer</td>
+        <td>P</td>
+        <td>11</td>
+        <td>12</td>
+        <td>16:20:00 s.d. 18:00:00</td>
+        <td><button type="button" class="btn btn-danger">Belum Waktunya</button></td>
+      </tr>
+      <tr>
+        <td>6</td>
+        <td>KO099N-Hendra Gunawan</td>
+        <td>25IF206</td>
+        <td>Sistem Operasi</td>
+        <td>T</td>
+        <td>1</td>
+        <td>2</td>
+        <td>07:00:00 s.d. 08:40:00</td>
+        <td><button type="button" class="btn btn-primary" disabled>Terkunci</button></td>
+      </tr>
+      <tr>
+        <td>7</td>
+        <td>KO050N-Mira Lestari</td>
+        <td>25IF207</td>
+        <td>Kewirausahaan</td>
+        <td>T</td>
+        <td>3</td>
+        <td>4</td>
+        <td>08:40:00 s.d. 10:20:00</td>
+        <td><button type="button" class="btn btn-default">Info</button></td>
+      </tr>
+      <tr>
+        <td>8</td>
+        <td>NAV</td>
+        <td>NAV</td>
+        <td>Navigasi</td>
+        <td>-</td><td>-</td><td>-</td><td>-</td>
+        <td><a href="/laman/logout" class="btn btn-danger">Logout</a></td>
+      </tr>
+    </tbody>
+  </table>
+</body>
+</html>
