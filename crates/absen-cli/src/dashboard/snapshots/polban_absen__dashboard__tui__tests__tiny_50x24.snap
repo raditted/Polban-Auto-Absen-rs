@@ -1,0 +1,28 @@
+---
+source: crates/absen-cli/src/dashboard/tui.rs
+expression: screen
+---
+╭POLBAN AUTO ABSEN───────────────────────────────╮
+│            >>> POLBAN AUTO ABSEN <<<          █│
+│        Polban Auto Absen -- Windows v3.0      █│
+│                                               █│
+│ ╭Identitas───────────────────────────────────╮█│
+│ │ Nama       : Budi Santoso                  │█│
+│ │ NIM        : 251511001                     │█│
+│ │ Jurusan    : D3-Teknik Informatika         │█│
+│ │ Tanggal    : Selasa, 17 November 2026      │█│
+│ │                                            │█│
+│ │ Status     : OK -- Authenticated           │█│
+│ │ Hasil Scan : 07:05:00 (1 siap absen | 1    │█│
+│ │              sudah absen | 1 belum buka |  │█│
+│ │              0 belum waktunya)             │││
+│ │ Engine     : http                          │││
+│ │ Interval   : 60s                           │││
+│ │ Next scan  : 00:42                         │││
+│ │ Absen      : 1 berhasil / 0 gagal          │││
+│ ╰────────────────────────────────────────────╯││
+│                                               ││
+│ ╭Jadwal Hari Ini─────────────────────────────╮││
+│ │ No Mata Kuliah                   Status    │││
+│ │────────────────────────────────────────────│││
+╰────siklus #3 | ↑↓ PgUp PgDn: scroll 1-22/39────╯

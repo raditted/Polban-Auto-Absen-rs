@@ -1,0 +1,32 @@
+---
+source: crates/absen-cli/src/dashboard/tui.rs
+expression: screen
+---
+╭POLBAN AUTO ABSEN─────────────────────────────────────────────────────────────╮
+│                           >>> POLBAN AUTO ABSEN <<<                         █│
+│                       Polban Auto Absen -- Windows v3.0                     █│
+│                                                                             █│
+│ ╭Identitas─────────────────────────────────────────────────────────────────╮█│
+│ │  Nama       : Budi Santoso                                               │█│
+│ │  NIM        : 251511001                                                  │█│
+│ │  Jurusan    : D3-Teknik Informatika                                      │█│
+│ │  Tanggal    : Selasa, 17 November 2026                                   │█│
+│ │                                                                          │█│
+│ │  Status     : OK -- Authenticated                                        │█│
+│ │  Hasil Scan : 07:05:00 (1 siap absen | 1 sudah absen | 1 belum buka | 0  │█│
+│ │               belum waktunya)                                            │█│
+│ │  Engine     : http   Interval : 60s   Next scan : 00:42                  │█│
+│ │  Absen      : 1 berhasil / 0 gagal                                       │█│
+│ ╰──────────────────────────────────────────────────────────────────────────╯█│
+│                                                                             █│
+│ ╭Jadwal Hari Ini───────────────────────────────────────────────────────────╮█│
+│ │  No Mata Kuliah                   Status     Dosen                       │█│
+│ │ ──────────────────────────────────────────────────────────────────────── │█│
+│ │   1 Struktur Data               SIAP ABSEN   Trisna Gelar Abdillah,      │█│
+│ │     07:00-09:30                              S.T., M.Kom                 │█│
+│ │   2 Basis Data                 SUDAH ABSEN   Siti Aminah, M.T.           │█│
+│ │     09:30-12:00                                                          │││
+│ │   3 Jaringan Komputer           BELUM BUKA   Andi Wijaya                 │││
+│ │     13:00-15:30                                                          │││
+│ ╰──────────────────────────────────────────────────────────────────────────╯││
+╰──────siklus #3 | ↑↓ PgUp PgDn Home End: scroll 1-26/31 | Ctrl+C keluar───────╯

@@ -3,14 +3,14 @@
 mod dashboard;
 mod platform;
 
-use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
 
-use absen_core::{AbsenClient, Config, DumpError, EngineError};
+use absen_core::{AbsenClient, ChannelReporter, Config, DumpError, EngineError, Event};
 use anyhow::Context;
 use clap::Parser;
 use dashboard::plain::PlainReporter;
+use dashboard::tui::{self, TuiOptions};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -114,40 +114,71 @@ fn run_cli() -> anyhow::Result<i32> {
         };
     }
 
-    // F4 will attach TUI dashboard when `!use_plain`.
-    let _use_plain = cli.plain || !std::io::stdout().is_terminal();
-    let _alt_screen = !cli.no_alt_screen && !cli.once;
-    let _ascii = cli.ascii;
-
-    let reporter = Arc::new(PlainReporter::new(&cfg.engine, cfg.interval));
-    reporter.start();
+    let use_plain = cli.plain || !tui::is_interactive_tty();
+    let alt_screen = !cli.no_alt_screen && !cli.once;
+    let loop_mode = !cli.once;
 
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
+    let ctrlc_tx = shutdown_tx.clone();
     ctrlc::set_handler(move || {
-        let _ = shutdown_tx.send(());
+        let _ = ctrlc_tx.send(());
     })
     .context("gagal memasang handler Ctrl+C")?;
 
-    let loop_mode = !cli.once;
-    let cfg_clone = cfg.clone();
-    let client_clone = client.clone();
-    let reporter_clone = Arc::clone(&reporter);
+    let engine_res = if use_plain {
+        let reporter = Arc::new(PlainReporter::new(&cfg.engine, cfg.interval));
+        reporter.start();
 
-    let worker = std::thread::spawn(move || {
-        absen_core::run(
-            &cfg_clone,
-            &client_clone,
-            loop_mode,
-            &*reporter_clone,
-            &shutdown_rx,
-        )
-    });
+        let cfg_clone = cfg.clone();
+        let client_clone = client.clone();
+        let reporter_clone = Arc::clone(&reporter);
+        let worker = std::thread::spawn(move || {
+            absen_core::run(
+                &cfg_clone,
+                &client_clone,
+                loop_mode,
+                &*reporter_clone,
+                &shutdown_rx,
+            )
+        });
 
-    let engine_res = worker
-        .join()
-        .map_err(|_| anyhow::anyhow!("worker thread mengalami panic"))?;
+        let res = worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("worker thread mengalami panic"))?;
+        reporter.render_summary();
+        res
+    } else {
+        let (event_tx, event_rx) = mpsc::channel::<Event>();
+        let reporter = Arc::new(ChannelReporter::new(event_tx));
 
-    reporter.render_summary();
+        let cfg_clone = cfg.clone();
+        let client_clone = client.clone();
+        let reporter_clone = Arc::clone(&reporter);
+        let worker = std::thread::spawn(move || {
+            absen_core::run(
+                &cfg_clone,
+                &client_clone,
+                loop_mode,
+                &*reporter_clone,
+                &shutdown_rx,
+            )
+        });
+
+        // Drop main's copy so `event_rx` closes as soon as `worker` finishes.
+        drop(reporter);
+
+        let tui_opts = TuiOptions {
+            alt_screen,
+            ascii: cli.ascii,
+            engine: cfg.engine.clone(),
+            interval: cfg.interval,
+        };
+        tui::run_tui(event_rx, shutdown_tx, tui_opts).context("TUI error")?;
+
+        worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("worker thread mengalami panic"))?
+    };
 
     match engine_res {
         Ok(()) => {
