@@ -2,75 +2,94 @@
 # ============================================================
 #  Polban Auto Absen - Installer Linux
 #  Jalankan:  bash install.sh
-#  Engine: HTTP (requests) - tanpa browser.
-#
-#  Bekerja di folder tempat script ini berada.
+#  Mengunduh binary release (musl static) atau build via Cargo.
 # ============================================================
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+BIN_OUT="$SCRIPT_DIR/polban-absen"
+REPO="${POLBAN_RELEASE_REPO:-raditted/auto-presensi}"
+
 echo "============================================================"
-echo " Polban Auto Absen -- Linux Installer"
+echo " Polban Auto Absen -- Linux Installer (Rust v3.0)"
 echo "============================================================"
 echo ""
 
-# [1/3] Cek Python >= 3.9
-echo "==> [1/3] Cek Python"
-if ! command -v python3 &>/dev/null; then
-    echo "    python3 tidak ditemukan."
-    echo "    Install dulu:"
-    echo "      Ubuntu/Debian : sudo apt install python3 python3-pip"
-    echo "      Fedora        : sudo dnf install python3 python3-pip"
-    echo "      Arch          : sudo pacman -S python python-pip"
-    exit 1
-fi
+detect_target() {
+  case "$(uname -m)" in
+    x86_64|amd64)   echo "x86_64-unknown-linux-musl" ;;
+    aarch64|arm64)  echo "aarch64-unknown-linux-musl" ;;
+    *)              echo "" ;;
+  esac
+}
 
-PY_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-PY_MAJOR=$(echo "$PY_VERSION" | cut -d. -f1)
-PY_MINOR=$(echo "$PY_VERSION" | cut -d. -f2)
+download_binary() {
+  local target="$1"
+  local url="https://github.com/${REPO}/releases/latest/download/polban-absen-${target}"
+  echo "    Mengunduh $url ..."
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$url" -o "$BIN_OUT"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$BIN_OUT" "$url"
+  else
+    return 1
+  fi
+}
 
-if [ "$PY_MAJOR" -lt 3 ] || ([ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 9 ]); then
-    echo "    Python $PY_VERSION terdeteksi, butuh >= 3.9"
-    exit 1
-fi
-echo "    Python $PY_VERSION -- OK"
-
-# [2/3] Siapkan virtual environment & install dependensi
-echo ""
-echo "==> [2/3] Siapkan virtual environment (.venv)"
-if [ ! -d "$SCRIPT_DIR/.venv" ]; then
-    python3 -m venv "$SCRIPT_DIR/.venv"
-    echo "    Virtual environment dibuat di $SCRIPT_DIR/.venv"
+echo "==> [1/2] Menyiapkan binary polban-absen"
+if [ -x "$BIN_OUT" ]; then
+  echo "    Binary sudah ada: $BIN_OUT"
 else
-    echo "    Virtual environment (.venv) sudah ada."
+  TARGET="$(detect_target)"
+  INSTALLED=0
+
+  if [ -n "$TARGET" ] && download_binary "$TARGET"; then
+    chmod +x "$BIN_OUT"
+    echo "    Binary release terpasang: $BIN_OUT"
+    INSTALLED=1
+  else
+    rm -f "$BIN_OUT"
+  fi
+
+  if [ "$INSTALLED" -eq 0 ] && [ -f "$SCRIPT_DIR/../Cargo.toml" ]; then
+    if command -v cargo >/dev/null 2>&1; then
+      echo "    Membangun dari source via cargo build --release..."
+      cargo build --release --manifest-path "$SCRIPT_DIR/../Cargo.toml" --bin polban-absen
+      cp "$SCRIPT_DIR/../target/release/polban-absen" "$BIN_OUT"
+      chmod +x "$BIN_OUT"
+      echo "    Build selesai: $BIN_OUT"
+      INSTALLED=1
+    fi
+  fi
+
+  if [ "$INSTALLED" -eq 0 ]; then
+    echo "[ERROR] Gagal mengunduh release maupun build dari source."
+    echo "        Pasang Rust (https://rustup.rs) lalu jalankan:"
+    echo "          cargo build --release --bin polban-absen"
+    exit 1
+  fi
 fi
 
-echo "    Menginstall dependensi (rich, requests, beautifulsoup4)..."
-"$SCRIPT_DIR/.venv/bin/pip" install --upgrade pip 2>/dev/null || true
-"$SCRIPT_DIR/.venv/bin/pip" install rich requests beautifulsoup4
-echo "    Dependensi terinstall."
-
-# [3/3] Siapkan .env
 echo ""
-echo "==> [3/3] Siapkan config"
+echo "==> [2/2] Siapkan config"
 if [ ! -f "$SCRIPT_DIR/.env" ]; then
-    if [ -f "$SCRIPT_DIR/.env.example" ]; then
-        cp "$SCRIPT_DIR/.env.example" "$SCRIPT_DIR/.env"
-        echo "    .env dibuat dari template -> EDIT: isi NIM & password."
-    else
-        cat > "$SCRIPT_DIR/.env" <<'EOF'
+  if [ -f "$SCRIPT_DIR/.env.example" ]; then
+    cp "$SCRIPT_DIR/.env.example" "$SCRIPT_DIR/.env"
+    echo "    .env dibuat dari template -> EDIT: isi NIM & password."
+  else
+    cat > "$SCRIPT_DIR/.env" <<'EOF'
 POLBAN_USERNAME=
 POLBAN_PASSWORD=
 POLBAN_TARGET_URL=https://akademik.polban.ac.id/ajar/absen
 POLBAN_INTERVAL=60
 POLBAN_ENGINE=http
 EOF
-        echo "    .env kosong dibuat -> EDIT: isi NIM & password."
-    fi
+    echo "    .env kosong dibuat -> EDIT: isi NIM & password."
+  fi
 else
-    echo "    .env sudah ada, dilewati."
+  echo "    .env sudah ada, dilewati."
 fi
 
 echo ""
@@ -82,12 +101,8 @@ echo "   1. Edit .env (isi NIM & password):"
 echo "        nano $SCRIPT_DIR/.env"
 echo ""
 echo "   2. Tes sekali:"
-echo "        python3 $SCRIPT_DIR/auto_absen.py --engine http --once"
+echo "        $BIN_OUT --engine http --once"
 echo ""
 echo "   3. Mode loop (live dashboard):"
 echo "        bash $SCRIPT_DIR/run.sh"
-echo ""
-echo "   4. (Opsional) Install Playwright untuk engine pw:"
-echo "        $SCRIPT_DIR/.venv/bin/pip install playwright"
-echo "        $SCRIPT_DIR/.venv/bin/playwright install chromium"
 echo "============================================================"

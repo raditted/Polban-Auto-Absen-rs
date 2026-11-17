@@ -63,3 +63,6 @@ env/
 /target/
 **/*.rs.bk
 *.pdb
+windows/polban-absen.exe
+linux/polban-absen
+termux/polban-absen

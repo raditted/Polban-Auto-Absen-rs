@@ -1,64 +1,75 @@
 @echo off
 REM ============================================================
 REM  Polban Auto Absen - Installer Windows (sekali saja)
-REM  Mengunduh Python embedded + dependensi, tanpa install sistem.
-REM  Jalankan: klik 2x install.bat
+REM  Menyiapkan binary polban-absen.exe (build Cargo lokal atau
+REM  unduh dari GitHub Releases) dan membuat .env dari template.
 REM ============================================================
-setlocal
+setlocal EnableExtensions DisableDelayedExpansion
 cd /d "%~dp0"
-set "PYDIR=%~dp0python"
-set "PYZIP=%~dp0python-embed.zip"
-set "PYVER=3.11.9"
-set "PYURL=https://www.python.org/ftp/python/%PYVER%/python-%PYVER%-embed-amd64.zip"
+set "BIN_OUT=%~dp0polban-absen.exe"
+set "REPO=%POLBAN_RELEASE_REPO%"
+if not defined REPO set "REPO=raditted/auto-presensi"
+set "DL_URL=https://github.com/%REPO%/releases/latest/download/polban-absen-x86_64-pc-windows-msvc.exe"
 
-echo [1/5] Cek Python embedded...
-if exist "%PYDIR%\python.exe" goto havepy
-
-echo       Mengunduh Python %PYVER% embedded...
-powershell -NoProfile -Command "Invoke-WebRequest -Uri '%PYURL%' -OutFile '%PYZIP%'" || goto dl_fail
-echo       Mengekstrak...
-powershell -NoProfile -Command "Expand-Archive -Force '%PYZIP%' '%PYDIR%'" || goto dl_fail
-del "%PYZIP%" >nul 2>&1
-
-:havepy
-echo [2/5] Aktifkan pip di embedded Python...
-REM Hapus komentar "import site" di file ._pth agar pip bisa jalan
-for %%f in ("%PYDIR%\python*._pth") do (
-  powershell -NoProfile -Command "(Get-Content '%%f') -replace '#import site','import site' | Set-Content '%%f'"
+echo [1/2] Menyiapkan binary polban-absen.exe...
+if exist "%BIN_OUT%" (
+  echo       Sudah ada: %BIN_OUT%
+  goto check_env
 )
 
-echo [3/5] Unduh get-pip...
-if not exist "%PYDIR%\Scripts\pip.exe" (
-  powershell -NoProfile -Command "Invoke-WebRequest -Uri 'https://bootstrap.pypa.io/get-pip.py' -OutFile '%PYDIR%\get-pip.py'" || goto dl_fail
-  "%PYDIR%\python.exe" "%PYDIR%\get-pip.py" --no-warn-script-location || goto dl_fail
+if exist "%~dp0..\target\release\polban-absen.exe" (
+  copy /Y "%~dp0..\target\release\polban-absen.exe" "%BIN_OUT%" >nul
+  echo       Disalin dari ..\target\release\polban-absen.exe
+  goto check_env
 )
 
-echo [4/5] Install dependensi (requests, beautifulsoup4, rich)...
-REM rich dipakai untuk live TUI dashboard (tui.py). Kalau gagal diinstall,
-REM engine tetap jalan dalam mode plain text.
-"%PYDIR%\python.exe" -m pip install --quiet --no-warn-script-location requests beautifulsoup4 rich || goto dl_fail
-
-echo [5/5] Siapkan config...
-if not exist "%~dp0.env" (
-  if exist "%~dp0.env.example" (copy "%~dp0.env.example" "%~dp0.env" >nul) else (
-    (echo POLBAN_USERNAME=& echo POLBAN_PASSWORD=& echo POLBAN_TARGET_URL=https://akademik.polban.ac.id/ajar/absen& echo POLBAN_INTERVAL=60& echo POLBAN_ENGINE=http) > "%~dp0.env"
+if exist "%~dp0..\Cargo.toml" (
+  where cargo >nul 2>&1
+  if not errorlevel 1 (
+    echo       Membangun dari source via cargo build --release...
+    cargo build --release --manifest-path "%~dp0..\Cargo.toml" --bin polban-absen
+    if not errorlevel 1 if exist "%~dp0..\target\release\polban-absen.exe" (
+      copy /Y "%~dp0..\target\release\polban-absen.exe" "%BIN_OUT%" >nul
+      echo       Build selesai: %BIN_OUT%
+      goto check_env
+    )
+    echo       Build cargo gagal -- mencoba unduh release binary...
   )
-  echo       .env dibuat. EDIT dulu: isi NIM ^& password.
+)
+
+echo       Mengunduh release binary dari %DL_URL% ...
+powershell -NoProfile -Command "Invoke-WebRequest -Uri '%DL_URL%' -OutFile '%BIN_OUT%'"
+if errorlevel 1 (
+  if exist "%BIN_OUT%" del "%BIN_OUT%" >nul 2>&1
+  echo.
+  echo [ERROR] Gagal menyiapkan polban-absen.exe.
+  echo         Pastikan terhubung internet, atau pasang Rust lalu jalankan:
+  echo           cargo build --release --bin polban-absen
+  pause
+  exit /b 1
+)
+
+:check_env
+echo [2/2] Menyiapkan config .env...
+if not exist "%~dp0.env" (
+  if exist "%~dp0.env.example" (
+    copy "%~dp0.env.example" "%~dp0.env" >nul
+    echo       .env dibuat. EDIT dulu: isi NIM ^& password.
+  ) else (
+    (echo POLBAN_USERNAME=& echo POLBAN_PASSWORD=& echo POLBAN_TARGET_URL=https://akademik.polban.ac.id/ajar/absen& echo POLBAN_INTERVAL=60& echo POLBAN_ENGINE=http) > "%~dp0.env"
+    echo       .env dibuat. EDIT dulu: isi NIM ^& password.
+  )
+) else (
+  echo       .env sudah ada, dilewati.
 )
 
 echo.
 echo ============================================================
 echo  SELESAI. Langkah selanjutnya:
-echo   1. Edit .env (klik kanan -^> Edit / buka Notepad), isi:
+echo   1. Edit .env (buka Notepad), isi:
 echo        POLBAN_USERNAME=NIM_kamu
 echo        POLBAN_PASSWORD=password_kamu
 echo   2. Klik 2x  auto_absen.bat   untuk menjalankan.
 echo ============================================================
 pause
 exit /b 0
-
-:dl_fail
-echo.
-echo [ERROR] Gagal mengunduh/menginstall. Cek koneksi internet lalu coba lagi.
-pause
-exit /b 1
