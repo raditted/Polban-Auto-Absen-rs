@@ -19,4 +19,5 @@ ctrlc.workspace = true
 ratatui.workspace = true
 
 [dev-dependencies]
+httpmock.workspace = true
 insta.workspace = true

@@ -231,6 +231,43 @@ fn build_scan_summary(actions: &[Action], skips: &[Skip]) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
+fn record_attendance_success(
+    action: &Action,
+    attempt: u32,
+    confirmed: bool,
+    clicked: &mut ClickedState,
+    tracker: &mut JadwalTracker,
+    reporter: &dyn Reporter,
+) {
+    let msg = if confirmed {
+        format!(
+            "BERHASIL (percobaan {attempt}, dikonfirmasi): {}",
+            truncate_str(&action.nama_mk, 50)
+        )
+    } else {
+        format!(
+            "BERHASIL (percobaan {attempt}): {}",
+            truncate_str(&action.nama_mk, 55)
+        )
+    };
+    emit_log(reporter, "ABSEN", msg, LogLevel::Ok);
+    reporter.emit(Event::MarkResult {
+        sig: action.sig.clone(),
+        success: true,
+        nama: action.nama_mk.clone(),
+    });
+    tracker.mark_success(&action.nama_mk);
+    if let Err(e) = clicked.insert_and_save(action.sig.clone()) {
+        emit_log(
+            reporter,
+            "STATE",
+            format!("gagal simpan state: {e}"),
+            LogLevel::Warn,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_once(
     cfg: &Config,
     client: &AbsenClient,
@@ -341,57 +378,13 @@ fn run_once(
             }
 
             if response_indicates_success(status, &body) {
-                emit_log(
-                    reporter,
-                    "ABSEN",
-                    format!(
-                        "BERHASIL (percobaan {attempt}): {}",
-                        truncate_str(&action.nama_mk, 55)
-                    ),
-                    LogLevel::Ok,
-                );
-                reporter.emit(Event::MarkResult {
-                    sig: action.sig.clone(),
-                    success: true,
-                    nama: action.nama_mk.clone(),
-                });
-                tracker.mark_success(&action.nama_mk);
-                if let Err(e) = clicked.insert_and_save(action.sig.clone()) {
-                    emit_log(
-                        reporter,
-                        "STATE",
-                        format!("gagal simpan state: {e}"),
-                        LogLevel::Warn,
-                    );
-                }
+                record_attendance_success(&action, attempt, false, clicked, tracker, reporter);
                 done = true;
                 break;
             }
 
             if !still_blue(client, cfg, &action) {
-                emit_log(
-                    reporter,
-                    "ABSEN",
-                    format!(
-                        "BERHASIL (percobaan {attempt}, dikonfirmasi): {}",
-                        truncate_str(&action.nama_mk, 50)
-                    ),
-                    LogLevel::Ok,
-                );
-                reporter.emit(Event::MarkResult {
-                    sig: action.sig.clone(),
-                    success: true,
-                    nama: action.nama_mk.clone(),
-                });
-                tracker.mark_success(&action.nama_mk);
-                if let Err(e) = clicked.insert_and_save(action.sig.clone()) {
-                    emit_log(
-                        reporter,
-                        "STATE",
-                        format!("gagal simpan state: {e}"),
-                        LogLevel::Warn,
-                    );
-                }
+                record_attendance_success(&action, attempt, true, clicked, tracker, reporter);
                 done = true;
                 break;
             }

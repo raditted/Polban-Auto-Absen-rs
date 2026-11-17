@@ -12,6 +12,7 @@ dependencies = [
  "clap",
  "crossterm",
  "ctrlc",
+ "httpmock",
  "insta",
  "ratatui",
 ]
