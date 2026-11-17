@@ -1,0 +1,22 @@
+[package]
+name = "absen-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "polban-absen"
+path = "src/main.rs"
+
+[dependencies]
+absen-core = { path = "../absen-core" }
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+ctrlc.workspace = true
+ratatui.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
