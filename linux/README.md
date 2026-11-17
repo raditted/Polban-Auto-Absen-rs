@@ -1,8 +1,6 @@
 # Polban Auto Absen — Linux (Terminal TUI)
 
-Auto-login + auto-klik tombol absen **biru** di `akademik.polban.ac.id/ajar/absen`.
-Versi Linux dengan **live terminal dashboard** — tabel jadwal diupdate in-place,
-countdown timer real-time, dan activity log ringkas tanpa output berulang.
+Auto-login + auto-klik tombol absen **biru** di `akademik.polban.ac.id/ajar/absen` menggunakan binary native Rust (`polban-absen`) dengan **live terminal dashboard** (`ratatui`).
 
 ---
 
@@ -12,7 +10,7 @@ countdown timer real-time, dan activity log ringkas tanpa output berulang.
   <img src="preview.png" alt="Polban Auto Absen Linux Dashboard" width="100%">
 </p>
 
-Dashboard berjalan **full-screen di alternate terminal buffer** (seperti `htop`/`btop`) — tidak meninggalkan riwayat scrollback shell dan tidak bisa di-scroll tanpa alasan. Panel diperbarui *in-place*, countdown timer berjalan detik demi detik selama jeda antar-scan, dan log aktivitas hanya mencatat 15 entri penting terakhir.
+Dashboard berjalan di **alternate terminal buffer** (seperti `htop`), mendukung scroll (`↑`/`↓`, `PgUp`/`PgDn`, `Home`/`End`, `j`/`k`/`g`/`G`/spasi/`b`), dan responsif terhadap lebar terminal (4 tingkat kolom tabel jadwal).
 
 ---
 
@@ -21,13 +19,13 @@ Dashboard berjalan **full-screen di alternate terminal buffer** (seperti `htop`/
 ```bash
 cd linux
 
-# 1. Install dependensi
+# 1. Unduh release binary (static musl) atau build via Cargo + siapkan .env
 bash install.sh
 
 # 2. Edit .env — isi NIM & password
 nano .env
 
-# 3. Tes sekali (mode plain, tanpa live TUI)
+# 3. Tes sekali (dashboard tetap terlihat setelah selesai)
 bash run.sh --once
 
 # 4. Mode loop (live dashboard)
@@ -39,11 +37,12 @@ bash run.sh
 ## Argumen CLI
 
 | Argumen | Keterangan |
-|---|---|
-| `--engine http` | Engine HTTP ringan, tanpa browser (default) |
-| `--engine pw` | Engine Playwright (render penuh, butuh `playwright install chromium`) |
-| `--once` | Sekali jalan lalu exit (untuk cron). Otomatis plain mode. |
-| `--plain` | Paksa mode plain text (tanpa rich TUI) |
+| --- | --- |
+| `--engine http` | Engine HTTP ringan (default; satu-satunya engine di v3.0) |
+| `--once` | Sekali jalan lalu exit (tanpa alternate screen; cocok untuk cron jika digabung `--plain`) |
+| `--plain` | Paksa mode plain text (tanpa live TUI) |
+| `--no-alt-screen` | Gambar dashboard di layar biasa (tanpa alternate screen) |
+| `--ascii` | Pakai box border ASCII (`+ - |`) |
 | `--dump [FILE]` | Simpan HTML halaman absen ke file lalu exit (diagnostik) |
 
 ---
@@ -51,37 +50,20 @@ bash run.sh
 ## File
 
 | File | Fungsi |
-|---|---|
-| `auto_absen.py` | Engine utama (HTTP/Playwright) + integrasi TUI |
-| `tui.py` | Modul TUI (rich-based live dashboard) |
-| `install.sh` | Installer (cek Python, pip install) |
-| `run.sh` | Launcher shortcut |
+| --- | --- |
+| `polban-absen` | Binary Rust (diunduh/dibangun oleh `install.sh`, di-ignore git) |
+| `install.sh` | Unduh binary release (`x86_64`/`aarch64` musl) atau build via `cargo build --release`, plus buat `.env` |
+| `run.sh` | Launcher shortcut (meneruskan `POLBAN_ENV` dan argumen CLI) |
 | `.env.example` | Template config |
 
 ---
 
-## Dependensi
+## Mode Plain / Non-TTY
 
-| Package | Wajib? | Alasan |
-|---|---|---|
-| `rich` | Ya | Live dashboard terminal |
-| `requests` | Ya | Engine HTTP |
-| `beautifulsoup4` | Ya | Parser HTML |
-| `playwright` | Opsional | Engine PW (fallback) |
-
-Semua via `pip` — tidak perlu kompilasi.
-
----
-
-## Mode Plain / Fallback
-
-Jika terminal tidak mendukung ANSI, atau `rich` tidak terinstall, atau `--plain` / `--once`:
-- Otomatis fallback ke output teks biasa (tanpa border/tabel/live)
-- Tidak crash, tidak ada errors
+Jika terminal bukan TTY (misalnya dialihkan ke file log / cron) atau memakai `--plain`:
+- Otomatis berjalan dalam mode plain text tanpa overhead TUI.
 
 ## Keamanan
 
-- Kredensial disimpan **lokal** (`.env`). Tidak dikirim ke server selain `akademik.polban.ac.id`.
-- File `.clicked.json` dan `absen-dump.html` sudah di-`.gitignore`.
-
----
+- Kredensial disimpan **lokal** di `.env` dan password di-redact di output debug.
+- File `.clicked.json`, `polban-absen`, dan `*-dump.html` sudah ada di `.gitignore`.

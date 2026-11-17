@@ -1,177 +1,148 @@
-# Polban Auto Absen
+# Polban Auto Absen (v3.0 — Rust)
 
-Auto-login + auto-klik tombol absen **biru** di `akademik.polban.ac.id/ajar/absen`, dengan log sukses/gagal yang jelas. Berjalan **lokal dengan IP asli** — bukan VPS.
+Auto-login + auto-klik tombol absen **biru** di `akademik.polban.ac.id/ajar/absen`, dengan log sukses/gagal yang jelas dan live terminal dashboard (`ratatui`). Berjalan **lokal dengan IP asli** sebagai satu binary mandiri tanpa runtime eksternal.
 
 ---
 
 **© 2026 Haikal. All rights reserved.** Lihat [LICENSE](LICENSE).
 
-## Struktur (setiap folder MANDIRI / self-contained)
-
-Setiap subfolder berisi **semua file yang dibutuhkan** — tidak bergantung ke folder lain. Salin satu folder, langsung jalan.
+## Struktur Repository
 
 ```
 polban-auto-absen/
-├── extension/          # Chrome MV3 (klik "Mulai Absen" -> otomatis)
-│   ├── manifest.json  background.js  content.js
-│   ├── popup.html  popup.js  options.html  options.js
+├── Cargo.toml                  # Workspace Rust v3.0
+├── rust-toolchain.toml         # Channel stable + fmt/clippy
+├── crates/
+│   ├── absen-core/             # Config, state (.clicked.json), parser HTML, HTTP client & engine
+│   └── absen-cli/              # Binary `polban-absen` + live TUI dashboard (ratatui) + mode plain
 │
-├── windows/            # Windows .bat (double-click, live TUI dashboard)
-│   ├── auto_absen.py        # engine (mandiri)
-│   ├── tui.py               # modul TUI (rich live dashboard)
-│   ├── persiapan.bat        # cek Python + dependensi + .env (dipanggil kedua launcher)
-│   ├── install.bat          # install Python portable (sekali)
-│   ├── auto_absen.bat       # jalankan (loop, dashboard)
-│   ├── absen_sekali.bat     # tes sekali (dashboard tetap di layar)
-│   ├── .env.example  README.md
+├── windows/                    # Launcher Windows (.bat -> polban-absen.exe)
+│   ├── install.bat             # Build via Cargo / unduh release binary + buat .env
+│   ├── persiapan.bat           # Cek binary & validasi .env (dipanggil kedua launcher)
+│   ├── auto_absen.bat          # Jalankan mode loop (live dashboard)
+│   ├── absen_sekali.bat        # Tes sekali jalan (--once)
+│   └── .env.example  README.md
 │
-├── linux/              # Linux (live TUI dashboard)
-│   ├── auto_absen.py        # engine + TUI integration (dirawat terpisah)
-│   ├── tui.py               # modul TUI (rich live dashboard)
-│   ├── install.sh           # installer
-│   ├── run.sh               # launcher
-│   ├── .env.example  README.md
+├── linux/                      # Launcher Linux
+│   ├── install.sh              # Unduh release musl static / build Cargo + buat .env
+│   ├── run.sh                  # Launcher utama
+│   └── .env.example  README.md  preview.png
 │
-├── termux/             # Android Termux (24/7, live TUI dashboard)
-│   ├── auto_absen.py        # engine (mandiri)
-│   ├── tui.py               # modul TUI (rich live dashboard)
-│   ├── termux-install.sh    # installer
-│   ├── termux-run.sh        # launcher (loop + auto-restart)
-│   ├── .env.example  README.md
+├── termux/                     # Launcher Android Termux (24/7)
+│   ├── termux-install.sh       # Unduh binary Android / pkg install rust + autostart Termux:Boot
+│   ├── termux-run.sh           # Launcher loop + wake-lock + auto-restart
+│   └── .env.example  README.md
 │
-└── README.md  CONTRIBUTING.md  LICENSE  .gitignore
+├── extension/                  # Chrome MV3 (JS, berjalan di browser)
+├── legacy/python/              # Arsip implementasi v2.0 (tidak lagi dipakai launcher)
+└── .github/workflows/          # CI (Linux/Windows/macOS) & Release multi-target
 ```
-
-> **Catatan:** `windows/` dan `termux/` memakai **file identik** (`auto_absen.py` + `tui.py`) — label platform di banner dideteksi otomatis saat runtime, jadi perbaikan cukup disalin apa adanya antar keduanya (`diff windows/auto_absen.py termux/auto_absen.py` harus kosong). `linux/` memegang salinannya sendiri dan **dirawat terpisah**.
 
 ## Fitur
 
-- ✅ **Auto-login** — isi NIM + password, submit.
-- ✅ **Bypass popup "Kuesioner Layanan"** — tidak perlu klik OK.
-- ✅ **Auto ke `/ajar/absen`** — setelah login langsung ke halaman absen.
-- ✅ **Klik HANYA tombol BIRU** — warna lain tidak diklik (tidak merespon).
-- ✅ **Retry sampai hijau** — klik biru → tunggu hijau → kalau belum, tekan ulang (maks `maxRetry`, default 5).
-- ✅ **Alasan per matkul** — hijau=sudah absen · orange=dosen belum buka · merah=di luar jadwal. Di `windows/`, `termux/`, dan extension ditampilkan di tabel jadwal (tidak lagi membanjiri log); di `linux/` masih berupa baris log.
-- ✅ **Log sukses/gagal** per tahap + nama matkul + sebab gagal.
-- ✅ **Event-driven**, **anti-duplikat per-hari**, **kredensial tersimpan permanen**.
-- ✅ **Extension hanya jalan saat dipicu** — flow berjalan hanya setelah menekan **▶ Mulai Absen**.
-- ✅ **Dependensi menyusul sendiri** — `auto_absen.bat` dan `absen_sekali.bat` sama-sama memanggil `persiapan.bat` (Python portable + paket + `.env`), dan `termux-run.sh` melakukan pemeriksaan yang setara. Setelah `git pull` yang menambah dependensi, cukup jalankan seperti biasa. Untuk `linux/`, jalankan `bash install.sh` sekali setelah pull.
-- ✅ **Tampilan menyesuaikan ukuran jendela & bisa di-scroll** (`windows/`, `termux/`, extension) — dashboard dibangun ulang tiap frame, jadi tabel jadwal berubah bentuk sendiri saat terminal di-maximize/di-restore: kolom Jam lalu Dosen melipat ke bawah nama matkul di layar sempit dan panel log mengisi sisa tinggi. Isi yang lebih tinggi dari jendela tidak dipotong, tapi bisa di-scroll dengan `↑`/`↓`, `PgUp`/`PgDn`, `Home`/`End` (atau roda mouse / swipe di terminal yang mendukung). Di Windows, buffer console ikut dilebarkan otomatis saat jendela di-maximize supaya tidak menyisakan area kosong di kanan. Panel extension melar/menyusut mengikuti lebar browser.
-- ✅ **Dashboard seragam di semua platform** — identitas mahasiswa, tabel jadwal hari ini dengan status per matkul, countdown scan berikutnya, log aktivitas ringkas. Di terminal (Windows/Linux/Termux) lewat `tui.py`, di browser lewat panel `content.js`.
+- **Satu binary mandiri (`polban-absen`)** — dikompilasi dengan Rust (`reqwest` + `rustls`), tanpa OpenSSL dan tanpa dependensi runtime eksternal.
+- **Auto-login & re-login otomatis** — mengisi NIM + password ke `/laman/login`, lalu memantau `/ajar/absen`. Jika sesi habis di tengah jalan, otomatis login ulang.
+- **Bypass popup "Kuesioner Layanan"** — karena bekerja di level HTTP, dialog JavaScript browser tidak menghalangi absen.
+- **Klik HANYA tombol BIRU** — tombol `btn-primary` / `btn-info` (yang tidak `disabled`) diklik lewat `POST /ajar/absen/absensi_awal`.
+- **Retry sampai terverifikasi** — memeriksa response POST, dan jika ambigu melakukan 1× GET konfirmasi (maks `POLBAN_MAX_RETRY`, default 5).
+- **Anti-duplikat harian** — menyimpan signature di `.clicked.json` dan reset otomatis saat ganti tanggal lokal.
+- **Live TUI Dashboard responsif (`ratatui`)** — panel **Identitas**, tabel **Jadwal Hari Ini** 4 tingkat lebar (`>=100` / `>=56` / `>=44` / `<44` kolom), countdown scan berikutnya, log ring buffer 15 entri, scroll (`↑`/`↓`, `PgUp`/`PgDn`, `Home`/`End`, `j`/`k`/`g`/`G`/spasi/`b`), dan terminal restore guard.
+- **Fallback plain otomatis** — otomatis beralih ke output plain text saat `--plain` dipakai atau stdout bukan TTY.
 
----
+## Cara Pakai
 
-## 🖥️ Extension (Chrome, Windows)
+### 1. Pakai Binary Release (tanpa install Rust)
+
+Unduh binary dari halaman **GitHub Releases** sesuai platform (atau jalankan `install.bat` / `install.sh` / `termux-install.sh` di folder platform masing-masing).
+
+### 2. Build Sendiri dari Source
+
+Butuh [Rust toolchain](https://rustup.rs/) (`stable`):
+
+```bash
+cargo build --release --bin polban-absen
+```
+
+Binary hasil build ada di `target/release/polban-absen` (atau `target\release\polban-absen.exe` di Windows).
+
+### Argumen CLI
+
+```bash
+polban-absen [OPSI]
+```
+
+| Argumen | Keterangan |
+|---|---|
+| `--engine http` | Engine HTTP ringan (satu-satunya engine yang didukung di v3.0) |
+| `--once` | Sekali jalan lalu exit (tanpa alternate screen agar dashboard tetap terbaca) |
+| `--plain` | Mode plain text tanpa live dashboard |
+| `--no-alt-screen` | Gambar dashboard di layar biasa (tanpa alternate screen) |
+| `--ascii` | Pakai border ASCII (`+ - |`) untuk terminal lama |
+| `--dump [FILE]` | Login lalu simpan HTML `/ajar/absen` ke `FILE` (default `absen-dump.html`) untuk diagnostik |
+
+> **Catatan migrasi dari v2.0:** Engine `--engine pw` (Playwright) sudah dihapus di versi Rust v3.0. Jika `--engine pw` atau `POLBAN_ENGINE=pw` diberikan, program mencetak pesan penolakan dan keluar dengan kode `1`.
+
+## 🖥️ Extension (Chrome)
 
 1. `chrome://extensions` → **Developer mode** ON → **Load unpacked** → pilih folder `extension/`.
 2. Klik ikon → **⚙️ Pengaturan** → isi NIM & password → **Simpan**.
-3. Klik ikon → **▶ Mulai Absen** → popup tertutup → tab akademik terbuka → semua otomatis → log panel muncul.
+3. Klik ikon → **▶ Mulai Absen**.
 
 ## 🖥️ Windows `.bat`
 
+Lihat [**`windows/README.md`**](windows/README.md).
+
 ```bat
 cd windows
-install.bat          :: sekali (unduh Python portable + rich)
+install.bat
 :: edit .env -> isi POLBAN_USERNAME & POLBAN_PASSWORD
-auto_absen.bat       :: jalankan (loop, live dashboard)
-absen_sekali.bat     :: tes sekali (dashboard tetap di layar)
+absen_sekali.bat
+auto_absen.bat
 ```
 
-Lihat **`windows/README.md`** — termasuk argumen `--plain` dan `--no-alt-screen`.
+## 🐧 Linux
 
-## Linux (Live TUI Dashboard)
-
-Lihat **`linux/README.md`** — panduan lengkap.
+Lihat [**`linux/README.md`**](linux/README.md).
 
 ```bash
 cd linux
 bash install.sh
-cp .env.example .env && nano .env
-python3 auto_absen.py --engine http --once   # tes
-bash run.sh                                  # loop (live dashboard)
+nano .env
+./polban-absen --once
+bash run.sh
 ```
 
-## Termux (Android)
+## 📱 Termux (Android)
 
-Lihat **`termux/README.md`** — panduan lengkap dari nol.
+Lihat [**`termux/README.md`**](termux/README.md).
 
 ```bash
 cd termux
 bash termux-install.sh
-cp .env.example .env && nano .env
-python auto_absen.py --engine http --once   # tes
-bash termux-run.sh                          # loop 24/7
+nano .env
+./polban-absen --once
+bash termux-run.sh
 ```
 
----
+## Cara Membaca Log & Status
 
-## Cara membaca log
+Format baris log: `HH:MM:SS  [TAG] [KODE] pesan`. Tag: `[OK]` sukses · `[!!]` gagal · `[??]` peringatan · `[--]` info · `[>>]` skip.
 
-### Extension (panel dashboard di pojok kanan bawah situs)
-
-| Log                                                          | Arti                     |
-| ------------------------------------------------------------ | ------------------------ |
-| `[OK] [LOGIN] Berhasil`                                           | login sukses             |
-| `[!!] [LOGIN] Gagal`                                              | NIM/password salah       |
-| `[??] [DIALOG] alert/confirm di-bypass`                           | popup dibungkam otomatis |
-| `[--] [NAV] Dari /Mhs ke /ajar/absen`                              | pindah ke halaman absen  |
-| `[--] [SCAN] #1: N tombol -- biru:x hijau:y ...`                   | hasil scan warna         |
-| `[--] [KLIK] Klik (biru) + retry sampai hijau: NamaMatkul`        | mulai klik               |
-| `[??] [VERIFIKASI] Percobaan 1/5: masih biru, tekan lagi...`      | belum hijau, diulang     |
-| `[OK] [VERIFIKASI] SUCCESS -- tombol jadi HIJAU (percobaan N)`     | **absen berhasil**       |
-| `[!!] [VERIFIKASI] GAGAL -- tidak jadi hijau setelah N percobaan`  | **absen gagal**          |
-
-### Engine (Windows / Termux / Linux) — panel Log Aktivitas
-
-Format baris: `HH:MM:SS  [TAG] [KODE] pesan`. Tag: `[OK]` sukses · `[!!]` gagal · `[??]` peringatan · `[--]` info · `[>>]` skip.
-
-| Log                                                                  | Arti                         |
-| -------------------------------------------------------------------- | ---------------------------- |
-| `[OK] [LOGIN] Authenticated`                                         | login sukses                 |
-| `[!!] [LOGIN] GAGAL -- dilempar ke ...`                              | NIM/password salah           |
-| `[--] [SCAN] Scan awal: 1 siap \| 1 sudah \| 0 belum buka ...`       | ringkasan scan per warna     |
-| `[--] [ABSEN] target: NamaMatkul (jam)`                              | mulai proses absen           |
-| `[??] [RETRY] percobaan 1/5 masih biru, tekan lagi`                  | belum berhasil, diulang      |
-| `[OK] [ABSEN] BERHASIL (percobaan N): NamaMatkul`                    | **absen berhasil**           |
-| `[!!] [ABSEN] GAGAL setelah N percobaan: NamaMatkul. Kemungkinan...` | **absen gagal** + sebab      |
-| `[??] [SESSION] Sesi habis -- re-login...`                           | sesi berakhir, auto re-login |
-| `[!!] [ERROR] request gagal...`                                      | error jaringan/request       |
-
-Di `windows/` dan `termux/`, rincian per mata kuliah **sengaja tidak ditulis ke log** —
-semuanya sudah ada di tabel **Jadwal Hari Ini** lengkap dengan alasannya, jadi log hanya
-memuat kejadian penting. (Di mode plain text yang tidak punya tabel, daftar jadwal dicetak
-sekali tiap kali ada status yang berubah.) Versi `linux/` masih menulis baris
-`[>>] [SKIP] (warna) alasan -- Matkul` untuk tiap baris non-biru.
-
-Status tiap mata kuliah dibaca dari tabel **Jadwal Hari Ini**, bukan dari log.
-Hanya ada **empat** status, mengikuti warna tombol di halaman akademik:
-
-| Status | Warna tombol | Arti |
+| Status Tabel | Warna | Arti |
 |---|---|---|
-| `SUDAH ABSEN` | hijau | absensi sudah tercatat |
-| `SIAP ABSEN` | biru | bisa diabsen sekarang — akan diklik otomatis |
-| `BELUM BUKA` | kuning | dosen belum membuka sesi absen |
-| `BELUM WAKTUNYA` | merah | di luar jam absensi |
+| `SUDAH ABSEN` | Hijau | Absensi sudah tercatat |
+| `SIAP ABSEN` | Biru | Bisa diabsen sekarang — akan diklik otomatis |
+| `BELUM BUKA` | Oranye/Kuning | Dosen belum membuka sesi absen |
+| `BELUM WAKTUNYA` | Merah | Di luar jam absensi |
 
-Kolom terakhir tabel berisi **nama dosen pengampu** (kode di depannya dibuang),
-bukan alasan status — alasannya sudah terbaca dari badge statusnya sendiri.
+### Kode Exit
 
-Begitu sebuah baris berhasil diabsenkan, statusnya **langsung berubah jadi
-`SUDAH ABSEN`** — tidak ada status "BERHASIL" terpisah. Kalau percobaannya gagal,
-barisnya tetap `SIAP ABSEN` dan diulang (sebab gagalnya muncul di Log Aktivitas),
-sampai semua yang biru berubah hijau. Pada mode loop, pengulangan berikutnya
-menunggu interval berikutnya.
-
-### Mode diagnostik `--dump` (engine)
-
-Kalau tombol biru tidak terdeteksi, dump HTML halaman absen untuk dianalisis:
-
-```bash
-python auto_absen.py --engine http --dump        # simpan ke absen-dump.html
-```
-
-File berisi HTML mentah (jangan di-commit — sudah di-`.gitignore`). Kirim strukturnya untuk penyesuaian selector.
+- `0`: selesai normal / dihentikan user (`Ctrl+C` atau `q`).
+- `1`: konfigurasi `.env` kosong/tidak valid, argumen salah (termasuk `--engine pw`), atau error runtime.
+- `2`: login gagal (NIM/password salah).
 
 ## Keamanan
 
-- Kredensial disimpan **lokal** (`chrome.storage` untuk extension; `.env` untuk engine). Tidak dikirim ke server selain `akademik.polban.ac.id`.
+- Kredensial disimpan **lokal** (`chrome.storage` untuk extension; `.env` untuk CLI). Tidak pernah dikirim selain ke host target yang dikonfigurasi.
+- `.env`, `.clicked.json`, dan `*-dump.html` sudah ada di `.gitignore`.
+- Password pada struct konfigurasi di-redact (`[REDACTED]`) pada output `Debug` dan tidak pernah ditulis ke log.

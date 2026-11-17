@@ -1,117 +1,75 @@
 # Polban Auto Absen — Termux (Android)
 
-Jalankan auto-absen di HP Android **tanpa browser**, hemat baterai, bisa background 24/7 — dengan **live dashboard** yang sama seperti versi Linux (identitas, tabel jadwal, countdown, log aktivitas).
+Jalankan auto-absen di HP Android **tanpa browser**, hemat baterai, bisa background 24/7 — memakai binary native Rust (`polban-absen`) dengan **live TUI dashboard** yang responsif hingga layar HP sempit (`< 44` kolom).
 
 ## Prasyarat
 
-- **Termux** — install dari **F-Droid** (bukan Play Store, versi di sana sudah usang).
-- (Opsional) **Termux:Boot** dari F-Droid — untuk auto-jalan saat HP nyala.
-- (Opsional) **Termux:API** — untuk `termux-wake-lock` (cegah CPU tidur).
+- **Termux** — install dari **F-Droid** (bukan Play Store).
+- *(Opsional)* **Termux:Boot** dari F-Droid — untuk auto-jalan saat HP nyala.
+- *(Opsional)* **Termux:API** — untuk `termux-wake-lock` (cegah CPU tidur).
 
-## Instalasi (lengkap, dari nol)
+## Instalasi
 
-1. **Salin file ke HP.** Kamu butuh `auto_absen.py`, `tui.py`, `.env.example`, `termux-install.sh`, `termux-run.sh`. Cara termudah:
-
-   ```bash
-   # Dari komputer/VPS yang punya filenya, kirim ke HP via scp/ssh,
-   # atau clone repo git, atau salin manual lewat file manager/USB.
-   ```
-
-   Di Termux, buat folder kerja:
+1. **Siapkan folder kerja** di Termux (atau `git clone` repo ini):
 
    ```bash
-   mkdir -p ~/polban-auto-absen && cd ~/polban-auto-absen
-   # letakkan auto_absen.py, tui.py, .env.example, termux-install.sh, termux-run.sh di sini
-   ```
-
-2. **Jalankan installer** (install python + dependensi + autostart):
-
-   ```bash
+   cd termux
    bash termux-install.sh
    ```
 
-3. **Isi kredensial:**
+   `termux-install.sh` otomatis mengunduh binary target Android (`aarch64-linux-android` / `armv7-linux-androideabi`), atau fallback memasang `rust` via `pkg install -y rust` dan menjalankan `cargo build --release`, serta membuat `.env` dan autostart `~/.termux/boot/start-auto-absen.sh`.
+
+2. **Isi kredensial:**
 
    ```bash
-   cp .env.example .env
    nano .env
    ```
 
-   Isi (tanpa kutip, simbol `# ! @` spasi aman):
+   Isi tanpa kutip (simbol `# ! @` dan spasi aman; hanya baris yang diawali `#` yang dianggap komentar):
 
-   ```
+   ```env
    POLBAN_USERNAME=NIM_kamu
    POLBAN_PASSWORD=password_kamu
    ```
 
-   Simpan: `Ctrl+O` → Enter → `Ctrl+X`.
-
-4. **Tes sekali** (pastikan login + deteksi tombol jalan):
+3. **Tes sekali:**
 
    ```bash
-   python auto_absen.py --engine http --once
+   ./polban-absen --engine http --once
    ```
 
-   Harus muncul banner, baris `[OK] [LOGIN] Authenticated`, lalu hasil scan tombol.
-   Mode `--once` otomatis plain text supaya log tetap terbaca setelah selesai.
-
-5. **Mode loop 24/7** (auto-restart bila error):
+4. **Mode loop 24/7** (auto-restart bila error jaringan, berhenti otomatis jika login gagal `exit 2`):
 
    ```bash
    bash termux-run.sh
    ```
 
-   Berhenti: `Ctrl+C`. Dashboard lebih tinggi dari layar HP? Swipe atas/bawah
-   (atau tombol panah di extra-keys) untuk scroll. Masih terasa sempit? Jalankan dengan
-   `bash termux-run.sh --no-alt-screen` (dashboard tanpa alternate screen)
-   atau `bash termux-run.sh --plain` (log mengalir biasa).
+   Berhenti: `Ctrl+C` atau `q`. Di layar sempit, jalankan `bash termux-run.sh --no-alt-screen` atau `bash termux-run.sh --plain`.
 
-6. **(Opsional) Autostart saat HP nyala** — installer sudah membuat `~/.termux/boot/start-auto-absen.sh`. Cukup install **Termux:Boot**, lalu buka sekali. Selesai — setiap HP nyala, auto-absen jalan sendiri di background.
-
-## Cara kerja
-
-Engine **HTTP** (`requests`), bukan browser:
-
-- Login via `POST /laman/login`, verifikasi dengan GET `/ajar/absen`.
-- Alert "Kuesioner Layanan" **tidak pernah muncul** (itu JavaScript browser).
-- Parse tabel `#jadwal`, klik HANYA tombol **biru** lewat `POST /ajar/absen/absensi_awal`,
-  retry sampai terverifikasi (maks `POLBAN_MAX_RETRY`), polling tiap `POLBAN_INTERVAL` detik (default 60).
-
-## Tampilan
-
-Output ditangani `tui.py` (`rich`): banner, panel **Identitas**, tabel **Jadwal Hari Ini**
-(status per matkul: SUDAH ABSEN / SIAP ABSEN / BELUM BUKA / BELUM WAKTUNYA, plus dosen pengampu),
-countdown scan berikutnya, dan **Log Aktivitas** 15 baris terakhir.
-
-Otomatis jatuh ke plain text bila `rich` tidak terpasang, output dialihkan ke file
-(autostart/`absen.log`), atau dijalankan dengan `--once` / `--plain`.
+## Argumen CLI
 
 | Argumen | Keterangan |
-|---|---|
-| `--once` | sekali jalan lalu exit; dashboard tetap di layar (plain kalau output ke file) |
-| `--plain` | paksa plain text |
-| `--no-alt-screen` | dashboard tanpa alternate screen (layar HP sempit) |
-| `--dump [FILE]` | simpan HTML halaman absen (diagnostik) |
+| --- | --- |
+| `--once` | Sekali jalan lalu exit (tanpa alternate screen) |
+| `--plain` | Paksa plain text |
+| `--no-alt-screen` | Dashboard tanpa alternate screen |
+| `--ascii` | Border ASCII (`+ - |`) |
+| `--dump [FILE]` | Simpan HTML halaman absen (diagnostik) |
 
-## Log
+## Log Background (Termux:Boot)
 
-Log tampil di terminal. Kalau autostart/background, log ditulis ke `~/polban-auto-absen/absen.log`:
+Jika memakai autostart Termux:Boot, output otomatis jatuh ke mode plain dan ditulis ke `absen.log`:
 
 ```bash
-tail -f ~/polban-auto-absen/absen.log
+tail -f absen.log
 ```
 
 ## Troubleshooting
 
-| Masalah                                               | Solusi                                                                                                                                                                  |
-| ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `command not found: python`                           | `pkg install -y python`                                                                                                                                                 |
-| `installing pip is forbidden / will break python-pip` | Jangan `pip install --upgrade pip`. Kalau sudah terlanjur: `pkg install -y --reinstall python-pip`, lalu `python -m pip install --user requests beautifulsoup4 rich`         |
-| `No module named requests`                            | `python -m pip install --user requests beautifulsoup4 rich`                                                                                                             |
-| dashboard tidak muncul (log polos)                    | `rich` belum terpasang: `python -m pip install --user rich`                                                                                                             |
-| tampilan dashboard pecah di layar sempit              | jalankan `bash termux-run.sh --no-alt-screen` atau `--plain`                                                                                                            |
-| `ERROR: POLBAN_USERNAME...`                           | `.env` belum ada/kosong → ulangi langkah 3                                                                                                                              |
-| `[ERROR] .env tidak ditemukan`                        | Letakkan `.env` di **folder yang sama** dengan `termux-run.sh` (bukan di `~/polban-auto-absen`). Atau jalankan eksplisit: `POLBAN_ENV=/path/ke/.env bash termux-run.sh` |
-| `Login GAGAL`                                         | NIM/password salah di `.env`                                                                                                                                            |
-| Berhenti sendiri saat HP tidur                        | install Termux:API lalu jalankan `termux-wake-lock`, atau pakai `termux-run.sh` (sudah panggil wake-lock)                                                               |
-| `Tidak ada tombol biru`                               | di luar jam absen / dosen belum buka — normal, dicoba lagi di poll berikutnya                                                                                           |
+| Masalah | Solusi |
+| --- | --- |
+| Binary gagal diunduh | Pastikan koneksi stabil, atau build lokal dengan `pkg install -y rust` lalu `cargo build --release --bin polban-absen` |
+| `ERROR: POLBAN_USERNAME...` | `.env` belum diisi — edit `.env` |
+| `[ERROR] .env tidak ditemukan` | Letakkan `.env` di folder yang sama dengan `termux-run.sh`, atau jalankan `POLBAN_ENV=/path/.env bash termux-run.sh` |
+| `Login GAGAL` (exit 2) | NIM/password salah di `.env` (loop otomatis berhenti agar tidak spam login) |
+| Berhenti saat HP tidur | Install Termux:API lalu jalankan `termux-wake-lock` (otomatis dipanggil oleh `termux-run.sh`) |
