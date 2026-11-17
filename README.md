@@ -4,7 +4,7 @@ Auto-login + auto-klik tombol absen **biru** di `akademik.polban.ac.id/ajar/abse
 
 ---
 
-**© 2026 Haikal. All rights reserved.** Lihat [LICENSE](LICENSE).
+**Rust v3.0 oleh [raditted](https://github.com/raditted)** — berdasarkan proyek asli oleh **Haikal**. Lihat [LICENSE](LICENSE).
 
 ## Struktur Repository
 

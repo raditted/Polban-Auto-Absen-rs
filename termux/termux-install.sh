@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 BIN_OUT="$SCRIPT_DIR/polban-absen"
-REPO="${POLBAN_RELEASE_REPO:-raditted/auto-presensi}"
+REPO="${POLBAN_RELEASE_REPO:-raditted/Polban-Auto-Absen-rs}"
 
 detect_android_target() {
   case "$(uname -m)" in

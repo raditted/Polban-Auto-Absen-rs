@@ -8,7 +8,7 @@ setlocal EnableExtensions DisableDelayedExpansion
 cd /d "%~dp0"
 set "BIN_OUT=%~dp0polban-absen.exe"
 set "REPO=%POLBAN_RELEASE_REPO%"
-if not defined REPO set "REPO=raditted/auto-presensi"
+if not defined REPO set "REPO=raditted/Polban-Auto-Absen-rs"
 set "DL_URL=https://github.com/%REPO%/releases/latest/download/polban-absen-x86_64-pc-windows-msvc.exe"
 
 echo [1/2] Menyiapkan binary polban-absen.exe...
