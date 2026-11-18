@@ -52,7 +52,6 @@ name = "absen-gui"
 version = "3.0.0"
 dependencies = [
  "absen-core",
- "anyhow",
  "auto-launch",
  "chrono",
  "directories",

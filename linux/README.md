@@ -19,16 +19,17 @@ Dashboard berjalan di **alternate terminal buffer** (seperti `htop`), mendukung 
 ```bash
 cd linux
 
-# 1. Unduh release binary (static musl) atau build via Cargo + siapkan .env
+# 1. Unduh release binary (CLI static musl + Desktop GUI) atau build via Cargo + siapkan .env
 bash install.sh
+# Opsional: tambahkan --desktop untuk membuat shortcut ~/.local/share/applications/polban-presensi.desktop
+# bash install.sh --desktop
 
-# 2. Edit .env — isi NIM & password
+# 2A. Jalankan Aplikasi Desktop Polban Presensi (GUI)
+bash run-gui.sh
+
+# 2B. Atau mode CLI/TUI: edit .env lalu jalankan
 nano .env
-
-# 3. Tes sekali (dashboard tetap terlihat setelah selesai)
 bash run.sh --once
-
-# 4. Mode loop (live dashboard)
 bash run.sh
 ```
 
@@ -51,10 +52,24 @@ bash run.sh
 
 | File | Fungsi |
 | --- | --- |
-| `polban-absen` | Binary Rust (diunduh/dibangun oleh `install.sh`, di-ignore git) |
-| `install.sh` | Unduh binary release (`x86_64`/`aarch64` musl) atau build via `cargo build --release`, plus buat `.env` |
-| `run.sh` | Launcher shortcut (meneruskan `POLBAN_ENV` dan argumen CLI) |
+| `polban-absen` | Binary Rust CLI/TUI (diunduh/dibangun oleh `install.sh`, di-ignore git) |
+| `polban-absen-gui` | Binary Rust Desktop GUI **Polban Presensi** (diunduh/dibangun oleh `install.sh`, di-ignore git) |
+| `install.sh` | Unduh binary release CLI + GUI atau build via `cargo build --release`, plus opsi `.desktop` |
+| `run.sh` | Launcher CLI/TUI (meneruskan `POLBAN_ENV` dan argumen CLI) |
+| `run-gui.sh` | Launcher Desktop GUI (`polban-absen-gui`) |
 | `.env.example` | Template config |
+
+## Aplikasi Desktop (Linux)
+
+- Jika membangun `polban-absen-gui` dari source di Ubuntu/Debian, pasang paket dependensi sistem terlebih dahulu:
+  ```bash
+  sudo apt-get update && sudo apt-get install -y \
+    libgtk-3-dev libayatana-appindicator3-dev libxdo-dev \
+    libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+    libxkbcommon-dev libgl1-mesa-dev libdbus-1-dev
+  ```
+- Kredensial di GUI disimpan lewat Secret Service OS (GNOME Keyring/KWallet) jika tersedia, atau memori sesi sebagai fallback.
+- Jalankan `bash install.sh --desktop` untuk menambahkan **Polban Presensi** ke menu aplikasi (`~/.local/share/applications/polban-presensi.desktop`).
 
 ---
 

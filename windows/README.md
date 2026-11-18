@@ -10,12 +10,21 @@ Dashboard digambar di **alternate screen buffer** (seperti `htop`), jadi layar b
 
 | File | Tugas |
 | --- | --- |
-| `polban-absen.exe` | Binary Rust (diunduh/dibangun oleh `install.bat`, di-ignore git) |
-| `persiapan.bat` | Dicek otomatis oleh launcher: pastikan `polban-absen.exe` tersedia + `.env` valid |
-| `install.bat` | Jalankan SEKALI — build dari source (jika ada `cargo`) atau unduh release binary + buat `.env` |
-| `auto_absen.bat` | Jalankan mode loop (poll tiap `POLBAN_INTERVAL` detik) |
-| `absen_sekali.bat` | Tes SEKALI jalan lalu berhenti (dashboard tetap terlihat di layar) |
+| `polban-absen.exe` | Binary Rust CLI/TUI (diunduh/dibangun oleh `install.bat`, di-ignore git) |
+| `polban-absen-gui.exe` | Binary Desktop GUI **Polban Presensi** (diunduh/dibangun oleh `install.bat`, di-ignore git) |
+| `polban_presensi_gui.bat` | Launcher Desktop GUI tanpa meninggalkan jendela cmd hitam |
+| `persiapan.bat` | Dicek otomatis oleh launcher CLI: pastikan `polban-absen.exe` tersedia + `.env` valid |
+| `install.bat` | Jalankan SEKALI: build/unduh `polban-absen.exe` dan `polban-absen-gui.exe` + buat `.env` |
+| `auto_absen.bat` | Jalankan mode loop CLI (live dashboard) |
+| `absen_sekali.bat` | Tes SEKALI jalan CLI lalu berhenti (dashboard tetap terlihat di layar) |
 | `.env.example` | Template config |
+
+## Aplikasi Desktop (Polban Presensi GUI)
+
+1. Jalankan `install.bat` sekali untuk menyiapkan `polban-absen-gui.exe` (build lokal via Cargo atau unduh release `polban-absen-gui-x86_64-pc-windows-msvc.exe`).
+2. Klik 2x `polban_presensi_gui.bat` (atau langsung klik 2x `polban-absen-gui.exe`).
+3. Masukkan NIM dan kata sandi langsung di layar onboarding (disimpan aman di Windows Credential Manager) atau klik **Impor dari .env**.
+4. Jendela dapat disembunyikan ke system tray, mendukung notifikasi Windows, autostart saat login (`--minimized`), serta ekspor HTML diagnostik dari menu Pengaturan.
 
 ## Cara Pakai (dari awal)
 

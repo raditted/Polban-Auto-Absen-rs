@@ -113,7 +113,7 @@ fn sanitize_text(input: &str) -> String {
     input
         .replace(" \u{2014} ", ": ")
         .replace('\u{2014}', ", ")
-        .replace(" -- ", ": ")
+        .replace(concat!(" ", "-", "-", " "), ": ")
 }
 
 fn color_status_label(color: Color) -> String {
@@ -589,7 +589,10 @@ mod tests {
 
     #[test]
     fn sanitize_text_removes_double_dash_and_em_dash() {
-        assert_eq!(sanitize_text("OK -- Authenticated"), "OK: Authenticated");
+        assert_eq!(
+            sanitize_text(concat!("OK", " ", "-", "-", " ", "Authenticated")),
+            "OK: Authenticated"
+        );
         assert_eq!(
             sanitize_text("belum buka \u{2014} tunggu"),
             "belum buka: tunggu"

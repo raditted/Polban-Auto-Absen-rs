@@ -1,6 +1,8 @@
 //! Top-level `eframe::App` state, shortcuts, and responsive 3-breakpoint orchestration.
 
-use absen_core::AbsenClient;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 
 use crate::bridge::{EngineController, GuiSnapshot};
 use crate::credentials::{open_default_store, CredentialStore};
@@ -28,6 +30,8 @@ pub struct DesktopApp {
     quit_requested: bool,
     headless: bool,
     test_snapshot: Option<GuiSnapshot>,
+    diag_rx: Option<mpsc::Receiver<Result<PathBuf, String>>>,
+    external_show_flag: Option<Arc<AtomicBool>>,
 }
 
 impl DesktopApp {
@@ -35,8 +39,13 @@ impl DesktopApp {
     pub fn new(cc: &eframe::CreationContext<'_>, start_minimized: bool) -> Self {
         configure_fonts(&cc.egui_ctx);
 
-        let prefs = prefs::load().unwrap_or_default();
+        let mut prefs = prefs::load().unwrap_or_default();
         apply_theme(&cc.egui_ctx, prefs.theme);
+
+        let autostart = AutostartManager::new("Polban Presensi");
+        if let Ok(os_autostart) = autostart.is_enabled() {
+            prefs.autostart = os_autostart;
+        }
 
         let creds = open_default_store();
         let initial_password = if prefs.nim.trim().is_empty() {
@@ -51,13 +60,21 @@ impl DesktopApp {
 
         let settings = SettingsState::from_prefs(&prefs, initial_password);
         let notifier = Notifier::new(prefs.notifications_enabled);
-        let autostart = AutostartManager::new("Polban Presensi");
-        let tray = TrayManager::new().ok();
+        let mut tray = TrayManager::new().ok();
+        if let Some(t) = &mut tray {
+            t.set_egui_waker(cc.egui_ctx.clone());
+        }
+
+        let mut controller = EngineController::new();
+        controller.set_notifier(notifier.clone());
+        if start_minimized && tray.is_some() {
+            controller.set_window_visible(false);
+        }
 
         let mut app = Self {
             prefs,
             creds,
-            controller: EngineController::new(),
+            controller,
             tray,
             notifier,
             autostart,
@@ -68,6 +85,8 @@ impl DesktopApp {
             quit_requested: false,
             headless: false,
             test_snapshot: None,
+            diag_rx: None,
+            external_show_flag: None,
         };
 
         if !app.prefs.nim.trim().is_empty()
@@ -102,11 +121,13 @@ impl DesktopApp {
         let settings = SettingsState::from_prefs(&prefs, initial_password);
         let notifier = Notifier::new(prefs.notifications_enabled);
         let autostart = AutostartManager::new("Polban Presensi");
+        let mut controller = EngineController::new();
+        controller.set_notifier(notifier.clone());
 
         Self {
             prefs,
             creds,
-            controller: EngineController::new(),
+            controller,
             tray: None,
             notifier,
             autostart,
@@ -117,7 +138,21 @@ impl DesktopApp {
             quit_requested: false,
             headless: true,
             test_snapshot: None,
+            diag_rx: None,
+            external_show_flag: None,
         }
+    }
+
+    /// Attach a cross-process wakeup flag used by the single-instance listener.
+    pub fn set_external_show_flag(&mut self, flag: Arc<AtomicBool>) {
+        self.external_show_flag = Some(flag);
+    }
+
+    fn reveal_window(&self, ctx: &egui::Context) {
+        self.controller.set_window_visible(true);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
 
     /// Inject or clear a deterministic `GuiSnapshot` for headless UI testing.
@@ -205,9 +240,7 @@ impl DesktopApp {
         for cmd in commands {
             match cmd {
                 TrayCommand::ShowWindow => {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    self.reveal_window(ctx);
                 }
                 TrayCommand::ToggleMonitoring => {
                     if self.controller.is_running() {
@@ -260,40 +293,79 @@ impl DesktopApp {
         }
     }
 
-    fn handle_import_dotenv(&mut self) {
-        let candidate = prefs::detect_env_candidates()
-            .into_iter()
-            .next()
-            .or_else(|| {
-                if self.headless {
-                    None
-                } else {
-                    rfd::FileDialog::new()
-                        .set_title("Pilih file .env Polban Presensi")
-                        .pick_file()
-                }
-            });
+    fn apply_dotenv_result(&mut self, res: prefs::DotenvImportResult) {
+        let pw = res.password.unwrap_or_default();
+        let nim = res.prefs.nim.trim().to_string();
 
-        let Some(path) = candidate else {
-            self.settings.status_message =
-                Some("Tidak ditemukan file .env di direktori standar.".to_string());
+        let mut merged_prefs = self.prefs.clone();
+        merged_prefs.nim = nim.clone();
+        merged_prefs.base_url = res.prefs.base_url;
+        merged_prefs.target_url = res.prefs.target_url;
+        merged_prefs.interval = res.prefs.interval;
+        merged_prefs.delay_min = res.prefs.delay_min;
+        merged_prefs.delay_max = res.prefs.delay_max;
+        merged_prefs.max_retry = res.prefs.max_retry;
+        merged_prefs.retry_wait = res.prefs.retry_wait;
+
+        let open = self.settings.open;
+        let mut next = SettingsState::from_prefs(&merged_prefs, pw.clone());
+        next.open = open;
+
+        let mut cred_saved = false;
+        if !nim.is_empty() && !pw.is_empty() {
+            if let Err(err) = self.creds.set_password(&nim, &pw) {
+                next.status_message = Some(format!(
+                    "File .env diimpor dari {}, namun gagal menyimpan kata sandi ke penyimpanan aman: {err}",
+                    res.source_path.display()
+                ));
+                next.status_is_error = true;
+                self.settings = next;
+                return;
+            }
+            cred_saved = true;
+        }
+
+        next.status_message = Some(if cred_saved {
+            format!(
+                "Kredensial berhasil diimpor dari {} dan disimpan.",
+                res.source_path.display()
+            )
+        } else {
+            format!(
+                "Konfigurasi berhasil diimpor dari {}.",
+                res.source_path.display()
+            )
+        });
+        next.status_is_error = false;
+        self.settings = next;
+    }
+
+    fn handle_import_dotenv(&mut self) {
+        let import_result = if self.headless {
+            prefs::detect_env_candidates()
+                .into_iter()
+                .next()
+                .map(|path| prefs::import_dotenv_file(&path))
+        } else {
+            match prefs::pick_dotenv_and_import() {
+                Some(res) => Some(res),
+                None => prefs::detect_env_candidates()
+                    .into_iter()
+                    .next()
+                    .map(|path| prefs::import_dotenv_file(&path)),
+            }
+        };
+
+        let Some(result) = import_result else {
+            self.settings.status_message = Some(
+                "Tidak ada file .env yang dipilih atau ditemukan di direktori standar.".to_string(),
+            );
             self.settings.status_is_error = true;
             return;
         };
 
-        match prefs::import_dotenv_file(&path) {
-            Ok(res) => {
-                let pw = res.password.unwrap_or_default();
-                let open = self.settings.open;
-                let mut next = SettingsState::from_prefs(&res.prefs, pw);
-                next.open = open;
-                next.status_message = Some(format!(
-                    "Kredensial berhasil diimpor dari {}.",
-                    res.source_path.display()
-                ));
-                next.status_is_error = false;
-                self.settings = next;
-            }
+        match result {
+            Ok(res) => self.apply_dotenv_result(res),
             Err(err) => {
                 self.settings.status_message = Some(format!("Gagal mengimpor .env: {err}"));
                 self.settings.status_is_error = true;
@@ -301,7 +373,13 @@ impl DesktopApp {
         }
     }
 
-    fn handle_export_diagnostic_html(&mut self) {
+    fn handle_export_diagnostic_html(&mut self, ctx: &egui::Context) {
+        if self.diag_rx.is_some() {
+            self.settings.status_message =
+                Some("Ekspor HTML diagnostik sedang berjalan, harap tunggu...".to_string());
+            self.settings.status_is_error = false;
+            return;
+        }
         if let Err(msg) = self.settings.validate_and_sync() {
             self.settings.status_message = Some(msg);
             self.settings.status_is_error = true;
@@ -327,33 +405,61 @@ impl DesktopApp {
             self.settings.status_is_error = false;
             return;
         }
-        let Some(out_path) = rfd::FileDialog::new()
-            .set_title("Simpan HTML Halaman Absen (Diagnostik)")
-            .set_file_name("absen-diagnostik.html")
-            .save_file()
-        else {
+        let Some(out_path) = prefs::pick_diagnostic_html_save_path() else {
             return;
         };
 
         let mut temp_prefs = self.prefs.clone();
         self.settings.apply_to_prefs(&mut temp_prefs);
         let cfg = temp_prefs.to_core_config(pw);
-        let export_result = match AbsenClient::new(&cfg.base_url) {
-            Ok(client) => client
-                .dump_absen_html(&cfg, &out_path)
-                .map_err(|e| e.to_string()),
-            Err(err) => Err(err.to_string()),
-        };
-        match export_result {
-            Ok(saved) => {
+
+        let (tx, rx) = mpsc::channel();
+        let wake_ctx = ctx.clone();
+        match std::thread::Builder::new()
+            .name("absen-diag-export".to_string())
+            .spawn(move || {
+                let res = EngineController::dump_diagnostic_html(&cfg, &out_path);
+                let _ = tx.send(res);
+                wake_ctx.request_repaint();
+            }) {
+            Ok(_) => {
+                self.diag_rx = Some(rx);
                 self.settings.status_message =
-                    Some(format!("HTML diagnostik tersimpan ke {}.", saved.display()));
+                    Some("Mengambil HTML halaman absen untuk diagnostik...".to_string());
                 self.settings.status_is_error = false;
             }
             Err(err) => {
                 self.settings.status_message =
-                    Some(format!("Gagal menyimpan HTML diagnostik: {err}"));
+                    Some(format!("Gagal memulai ekspor HTML diagnostik: {err}"));
                 self.settings.status_is_error = true;
+            }
+        }
+    }
+
+    fn poll_diagnostic_export(&mut self) {
+        let result = match &self.diag_rx {
+            Some(rx) => match rx.try_recv() {
+                Ok(res) => Some(res),
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err(
+                    "Proses ekspor HTML diagnostik berhenti sebelum selesai.".to_string(),
+                )),
+                Err(mpsc::TryRecvError::Empty) => None,
+            },
+            None => None,
+        };
+        if let Some(res) = result {
+            self.diag_rx = None;
+            match res {
+                Ok(saved) => {
+                    self.settings.status_message =
+                        Some(format!("HTML diagnostik tersimpan ke {}.", saved.display()));
+                    self.settings.status_is_error = false;
+                }
+                Err(err) => {
+                    self.settings.status_message =
+                        Some(format!("Gagal menyimpan HTML diagnostik: {err}"));
+                    self.settings.status_is_error = true;
+                }
             }
         }
     }
@@ -392,16 +498,27 @@ impl DesktopApp {
                 return false;
             }
         }
+        let mut autostart_err = None;
         if !self.headless {
             if let Err(e) = prefs::save(&self.prefs) {
                 self.settings.status_message = Some(format!("Gagal menyimpan preferensi: {e}"));
                 self.settings.status_is_error = true;
                 return false;
             }
-            let _ = self.autostart.set_enabled(self.prefs.autostart);
+            if let Err(e) = self.autostart.set_enabled(self.prefs.autostart) {
+                autostart_err = Some(e);
+            }
         }
         self.notifier.set_enabled(self.prefs.notifications_enabled);
+        self.controller.set_notifier(self.notifier.clone());
         apply_theme(ctx, self.prefs.theme);
+        if let Some(err) = autostart_err {
+            self.settings.status_message = Some(format!(
+                "Pengaturan tersimpan, namun gagal mengatur autostart: {err}"
+            ));
+            self.settings.status_is_error = true;
+            return true;
+        }
         self.settings.status_message = Some("Pengaturan tersimpan.".to_string());
         self.settings.status_is_error = false;
         if close_modal {
@@ -415,17 +532,28 @@ impl DesktopApp {
         if self.start_minimized && !self.minimized_applied {
             self.minimized_applied = true;
             if self.tray.is_some() {
+                self.controller.set_window_visible(false);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            } else {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
             }
         }
 
+        if let Some(flag) = &self.external_show_flag {
+            if flag.swap(false, Ordering::AcqRel) {
+                self.reveal_window(ctx);
+            }
+        }
+
         self.handle_tray_commands(ctx);
+        self.poll_diagnostic_export();
 
         if ctx.input(|i| i.viewport().close_requested())
             && !self.quit_requested
             && self.prefs.minimize_to_tray
             && self.tray.is_some()
         {
+            self.controller.set_window_visible(false);
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
@@ -615,7 +743,7 @@ impl DesktopApp {
                     self.handle_import_dotenv();
                 }
                 SettingsAction::ExportDiagnosticHtml => {
-                    self.handle_export_diagnostic_html();
+                    self.handle_export_diagnostic_html(ctx);
                 }
             }
         }
@@ -625,5 +753,53 @@ impl DesktopApp {
 impl eframe::App for DesktopApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.update_ui(ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::credentials::MemoryFallbackStore;
+
+    #[test]
+    fn apply_dotenv_result_persists_password_to_credential_store() {
+        let ctx = egui::Context::default();
+        let creds = MemoryFallbackStore::new();
+        let mut app = DesktopApp::new_headless(&ctx, AppPrefs::default(), Box::new(creds));
+
+        let res = prefs::DotenvImportResult {
+            prefs: AppPrefs {
+                nim: "251511099".to_string(),
+                interval: 45,
+                ..AppPrefs::default()
+            },
+            password: Some("rahasia#123".to_string()),
+            source_path: PathBuf::from(".env"),
+        };
+
+        app.apply_dotenv_result(res);
+        assert_eq!(app.settings.nim, "251511099");
+        assert_eq!(app.settings.password, "rahasia#123");
+        assert_eq!(app.settings.interval, 45);
+        assert!(!app.settings.status_is_error);
+        assert_eq!(
+            app.creds.get_password("251511099").unwrap().as_deref(),
+            Some("rahasia#123")
+        );
+    }
+
+    #[test]
+    fn reveal_window_restores_controller_window_visibility() {
+        let ctx = egui::Context::default();
+        let app = DesktopApp::new_headless(
+            &ctx,
+            AppPrefs::default(),
+            Box::new(MemoryFallbackStore::new()),
+        );
+        app.controller.set_window_visible(false);
+        assert!(!app.controller.is_window_visible());
+
+        app.reveal_window(&ctx);
+        assert!(app.controller.is_window_visible());
     }
 }

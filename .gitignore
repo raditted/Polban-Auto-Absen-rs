@@ -64,5 +64,7 @@ env/
 **/*.rs.bk
 *.pdb
 windows/polban-absen.exe
+windows/polban-absen-gui.exe
 linux/polban-absen
+linux/polban-absen-gui
 termux/polban-absen

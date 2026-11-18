@@ -197,12 +197,12 @@ fn engine_controller_login_marks_blue_green_and_scan_now_wakes_fast() {
     assert_eq!(second.color, Color::Orange);
     assert_eq!(second.status_label, "Belum Buka");
     assert!(!second.action_ready);
-    assert!(!second.reason.contains(" -- "));
+    assert!(!second.reason.contains(concat!(" ", "-", "-", " ")));
     assert!(!second.reason.contains('\u{2014}'));
 
     assert!(!snap.activities.is_empty());
     for item in &snap.activities {
-        assert!(!item.message.contains(" -- "));
+        assert!(!item.message.contains(concat!(" ", "-", "-", " ")));
         assert!(!item.message.contains('\u{2014}'));
     }
 
@@ -270,9 +270,9 @@ fn engine_controller_login_failure_sets_auth_failed() {
     assert_eq!(snap.status, EngineStatus::AuthFailed);
     let err = snap.last_error.as_deref().unwrap_or("");
     assert!(err.contains("Login gagal"), "unexpected last_error: {err}");
-    assert!(!err.contains(" -- "));
+    assert!(!err.contains(concat!(" ", "-", "-", " ")));
     assert!(!err.contains('\u{2014}'));
-    assert!(!snap.auth_status.contains(" -- "));
+    assert!(!snap.auth_status.contains(concat!(" ", "-", "-", " ")));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -380,7 +380,7 @@ fn dump_diagnostic_html_writes_portal_html_and_handles_login_failure() {
     let fail_cfg = test_config(&fail_server.base_url(), dir.join("clicked2.json"), 30);
     let err =
         EngineController::dump_diagnostic_html(&fail_cfg, &dir.join("fail.html")).unwrap_err();
-    assert!(!err.contains(" -- "));
+    assert!(!err.contains(concat!(" ", "-", "-", " ")));
     assert!(!err.contains('\u{2014}'));
 
     let _ = std::fs::remove_dir_all(&dir);

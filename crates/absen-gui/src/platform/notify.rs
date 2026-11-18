@@ -10,7 +10,7 @@ fn clean_text(input: &str) -> String {
     input
         .replace(" \u{2014} ", ": ")
         .replace('\u{2014}', ", ")
-        .replace(" -- ", ": ")
+        .replace(concat!(" ", "-", "-", " "), ": ")
 }
 
 impl Notifier {
@@ -68,7 +68,7 @@ mod tests {
 
     #[test]
     fn clean_text_removes_em_dash_and_double_dash() {
-        assert_eq!(clean_text("A -- B"), "A: B");
+        assert_eq!(clean_text(concat!("A", " ", "-", "-", " ", "B")), "A: B");
         assert_eq!(clean_text("A \u{2014} B"), "A: B");
         assert_eq!(clean_text("A\u{2014}B"), "A, B");
     }

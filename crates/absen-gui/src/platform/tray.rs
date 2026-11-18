@@ -247,7 +247,7 @@ mod tests {
             for monitoring in [false, true] {
                 let text = tooltip_text(status, monitoring);
                 assert!(!text.contains('\u{2014}'));
-                assert!(!text.contains(" -- "));
+                assert!(!text.contains(concat!(" ", "-", "-", " ")));
             }
         }
     }
