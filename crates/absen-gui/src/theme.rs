@@ -89,7 +89,7 @@ impl Palette {
     };
 }
 
-/// Shared spacing, radius, and responsive layout constants from `DESIGN.md`.
+/// Shared spacing, radius, accessibility, and responsive layout constants from `DESIGN.md`.
 pub struct ThemeTokens;
 
 impl ThemeTokens {
@@ -103,6 +103,9 @@ impl ThemeTokens {
     pub const RADIUS_CARD: f32 = 8.0;
     pub const RADIUS_CONTROL: f32 = 6.0;
     pub const RADIUS_TAG: f32 = 4.0;
+
+    pub const MIN_TARGET_HEIGHT: f32 = 44.0;
+    pub const FOCUS_STROKE_WIDTH: f32 = 2.0;
 
     pub const BREAKPOINT_WIDE: f32 = 860.0;
     pub const BREAKPOINT_MEDIUM: f32 = 580.0;
@@ -207,7 +210,7 @@ pub fn apply_theme(ctx: &egui::Context, pref: ThemePreference) -> &'static Palet
 
     visuals.widgets.hovered.bg_fill = palette.bg_subtle;
     visuals.widgets.hovered.weak_bg_fill = palette.bg_subtle;
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.2_f32, palette.accent_text);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.5_f32, palette.accent_text);
     visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, palette.text_primary);
     visuals.widgets.hovered.rounding = control_rounding;
 
@@ -217,7 +220,18 @@ pub fn apply_theme(ctx: &egui::Context, pref: ThemePreference) -> &'static Palet
     visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, palette.on_accent);
     visuals.widgets.active.rounding = control_rounding;
 
-    ctx.set_visuals(visuals);
+    visuals.widgets.open.bg_fill = palette.bg_subtle;
+    visuals.widgets.open.weak_bg_fill = palette.bg_subtle;
+    visuals.widgets.open.bg_stroke = Stroke::new(1.5_f32, palette.accent_text);
+    visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, palette.text_primary);
+    visuals.widgets.open.rounding = control_rounding;
+
+    ctx.style_mut(|style| {
+        style.visuals = visuals;
+        style.spacing.item_spacing = egui::vec2(ThemeTokens::SPACE_SM, ThemeTokens::SPACE_SM);
+        style.spacing.button_padding = egui::vec2(ThemeTokens::SPACE_MD, ThemeTokens::SPACE_SM);
+    });
+
     palette
 }
 
@@ -247,66 +261,81 @@ pub fn contrast_ratio(fg: Color32, bg: Color32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
+
+    fn assert_text_bg(fg: Color32, bg: Color32, label: &str) {
+        let ratio = contrast_ratio(fg, bg);
+        assert!(
+            ratio >= 4.5,
+            "{label}: contrast {ratio:.4} is below WCAG AA 4.5"
+        );
+    }
+
+    fn assert_border_bg(fg: Color32, bg: Color32, label: &str) {
+        let ratio = contrast_ratio(fg, bg);
+        assert!(
+            ratio >= 3.0,
+            "{label}: contrast {ratio:.4} is below WCAG AA UI 3.0"
+        );
+    }
 
     fn assert_palette_wcag(p: &Palette, name: &str) {
-        // Normal text >= 4.5:1
-        assert!(
-            contrast_ratio(p.text_primary, p.bg_surface) >= 4.5,
-            "{name} text_primary/bg_surface"
-        );
-        assert!(
-            contrast_ratio(p.text_primary, p.bg_canvas) >= 4.5,
-            "{name} text_primary/bg_canvas"
-        );
-        assert!(
-            contrast_ratio(p.text_secondary, p.bg_surface) >= 4.5,
-            "{name} text_secondary/bg_surface"
-        );
-        assert!(
-            contrast_ratio(p.text_secondary, p.bg_canvas) >= 4.5,
-            "{name} text_secondary/bg_canvas"
-        );
-        assert!(
-            contrast_ratio(p.accent_text, p.bg_surface) >= 4.5,
-            "{name} accent_text/bg_surface"
-        );
-        assert!(
-            contrast_ratio(p.on_accent, p.accent) >= 4.5,
-            "{name} on_accent/accent"
+        for (bg_name, bg) in [
+            ("bg_canvas", p.bg_canvas),
+            ("bg_surface", p.bg_surface),
+            ("bg_subtle", p.bg_subtle),
+        ] {
+            assert_text_bg(
+                p.text_primary,
+                bg,
+                &format!("{name} text_primary/{bg_name}"),
+            );
+            assert_text_bg(
+                p.text_secondary,
+                bg,
+                &format!("{name} text_secondary/{bg_name}"),
+            );
+            assert_text_bg(p.accent_text, bg, &format!("{name} accent_text/{bg_name}"));
+
+            assert_border_bg(
+                p.border_interactive,
+                bg,
+                &format!("{name} border_interactive/{bg_name}"),
+            );
+            // Focus ring uses accent_text.
+            assert_border_bg(p.accent_text, bg, &format!("{name} focus_ring/{bg_name}"));
+        }
+
+        assert_text_bg(p.on_accent, p.accent, &format!("{name} on_accent/accent"));
+        assert_text_bg(
+            p.on_accent,
+            p.accent_hover,
+            &format!("{name} on_accent/accent_hover"),
         );
 
-        // Interactive control borders >= 3.0:1
-        assert!(
-            contrast_ratio(p.border_interactive, p.bg_surface) >= 3.0,
-            "{name} border_interactive/bg_surface"
-        );
-        assert!(
-            contrast_ratio(p.border_interactive, p.bg_canvas) >= 3.0,
-            "{name} border_interactive/bg_canvas"
-        );
-        assert!(
-            contrast_ratio(p.border_interactive, p.bg_subtle) >= 3.0,
-            "{name} border_interactive/bg_subtle"
-        );
-
-        // Semantic status badges: text >= 4.5:1, border >= 3.0:1
         for (label, text, bg, border) in [
             ("emerald", p.emerald_text, p.emerald_bg, p.emerald_border),
             ("amber", p.amber_text, p.amber_bg, p.amber_border),
             ("red", p.red_text, p.red_bg, p.red_border),
             ("blue", p.blue_text, p.blue_bg, p.blue_border),
         ] {
-            assert!(
-                contrast_ratio(text, bg) >= 4.5,
-                "{name} {label} text/bg < 4.5"
+            assert_text_bg(text, bg, &format!("{name} {label} text/bg"));
+            assert_text_bg(
+                text,
+                p.bg_surface,
+                &format!("{name} {label} text/bg_surface"),
             );
-            assert!(
-                contrast_ratio(border, p.bg_surface) >= 3.0,
-                "{name} {label} border/surface < 3.0"
+            assert_text_bg(text, p.bg_canvas, &format!("{name} {label} text/bg_canvas"));
+            assert_border_bg(border, bg, &format!("{name} {label} border/bg"));
+            assert_border_bg(
+                border,
+                p.bg_surface,
+                &format!("{name} {label} border/bg_surface"),
             );
-            assert!(
-                contrast_ratio(border, bg) >= 3.0,
-                "{name} {label} border/bg < 3.0"
+            assert_border_bg(
+                border,
+                p.bg_canvas,
+                &format!("{name} {label} border/bg_canvas"),
             );
         }
     }
@@ -327,6 +356,50 @@ mod tests {
         for bytes in fonts {
             assert!(bytes.len() > 10_000);
             assert_eq!(&bytes[..4], &[0x00, 0x01, 0x00, 0x00]);
+        }
+    }
+
+    fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_rs_files(&path, out);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    out.push(path);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn r02_zero_em_dash_or_double_hyphen_in_gui_sources_and_design_doc() {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        collect_rs_files(&manifest_dir.join("src"), &mut files);
+        collect_rs_files(&manifest_dir.join("tests"), &mut files);
+        let design_doc = manifest_dir.join("..").join("..").join("DESIGN.md");
+        if design_doc.is_file() {
+            files.push(design_doc);
+        }
+        assert!(!files.is_empty(), "expected files to scan for R-02");
+
+        let em_dash = '\u{2014}';
+        let double_hyphen = [" ", "-", "-", " "].concat();
+
+        for path in files {
+            let content = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("failed reading {}: {e}", path.display()));
+            assert!(
+                !content.contains(em_dash),
+                "R-02 violation: found U+2014 em dash in {}",
+                path.display()
+            );
+            assert!(
+                !content.contains(&double_hyphen),
+                "R-02 violation: found double-hyphen separator in {}",
+                path.display()
+            );
         }
     }
 }
