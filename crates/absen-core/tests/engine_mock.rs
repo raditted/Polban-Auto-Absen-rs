@@ -6,7 +6,7 @@ use absen_core::config::{
     Config, DEFAULT_DELAY_MAX, DEFAULT_DELAY_MIN, DEFAULT_ENGINE, DEFAULT_INTERVAL,
     DEFAULT_MAX_RETRY, DEFAULT_RETRY_WAIT,
 };
-use absen_core::engine::{run, EngineError};
+use absen_core::engine::{run, run_with_commands, EngineCommand, EngineError};
 use absen_core::event::{Event, Reporter, VecReporter};
 use absen_core::state::ClickedState;
 use absen_core::{AbsenClient, Action, Color, LogLevel};
@@ -566,4 +566,82 @@ fn default_constants_sanity() {
     assert!((DEFAULT_DELAY_MAX - 2.6).abs() < f64::EPSILON);
     assert!((DEFAULT_RETRY_WAIT - 2.5).abs() < f64::EPSILON);
     let _ = (Color::Blue, Action::clone, Local::now());
+}
+
+#[test]
+fn run_with_commands_scan_now_triggers_immediate_cycle_and_stop_exits() {
+    let server = MockServer::start();
+    let state_path = temp_state_path("cmd_scan_now");
+    let mut cfg = test_config(&server.base_url(), state_path.clone());
+    cfg.interval = 60;
+    let client = AbsenClient::new(&cfg.base_url).unwrap();
+
+    server.mock(|when, then| {
+        when.method(POST).path("/laman/login");
+        then.status(200).body("ok");
+    });
+    let m_target = server.mock(|when, then| {
+        when.method(GET).path("/ajar/absen");
+        then.status(200).body(JADWAL_GREEN_HTML);
+    });
+
+    let (cmd_tx, cmd_rx) = mpsc::channel();
+    let (ev_tx, ev_rx) = mpsc::channel();
+    let reporter = absen_core::ChannelReporter::new(ev_tx);
+
+    let start = Instant::now();
+    std::thread::scope(|s| {
+        let cfg_ref = &cfg;
+        let client_ref = &client;
+        let reporter_ref = &reporter;
+        let handle =
+            s.spawn(move || run_with_commands(cfg_ref, client_ref, true, reporter_ref, &cmd_rx));
+
+        // Wait until first countdown begins (Cycle 1 completed).
+        let mut saw_countdown = false;
+        while let Ok(ev) = ev_rx.recv_timeout(Duration::from_secs(2)) {
+            if matches!(ev, Event::Countdown(n) if n > 0) {
+                saw_countdown = true;
+                break;
+            }
+        }
+        assert!(saw_countdown, "expected initial countdown event");
+
+        // Trigger immediate scan.
+        cmd_tx.send(EngineCommand::ScanNow).unwrap();
+
+        // Expect Countdown(0) followed by a second CycleIncrement.
+        let mut saw_zero = false;
+        let mut cycles_after = 0usize;
+        while let Ok(ev) = ev_rx.recv_timeout(Duration::from_secs(2)) {
+            match ev {
+                Event::Countdown(0) => saw_zero = true,
+                Event::CycleIncrement => {
+                    cycles_after += 1;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_zero, "ScanNow should emit Countdown(0)");
+        assert_eq!(cycles_after, 1);
+
+        // Wait briefly for second countdown, then stop cleanly.
+        while let Ok(ev) = ev_rx.recv_timeout(Duration::from_secs(2)) {
+            if matches!(ev, Event::Countdown(n) if n > 0) {
+                break;
+            }
+        }
+        cmd_tx.send(EngineCommand::Stop).unwrap();
+        handle.join().unwrap().unwrap();
+    });
+
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "ScanNow + Stop took too long: {:?}",
+        start.elapsed()
+    );
+    assert_eq!(m_target.hits(), 2);
+
+    let _ = std::fs::remove_dir_all(state_path.parent().unwrap());
 }

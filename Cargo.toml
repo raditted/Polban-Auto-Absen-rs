@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/absen-core", "crates/absen-cli"]
+members = ["crates/absen-core", "crates/absen-cli", "crates/absen-gui"]
 resolver = "2"
 
 [workspace.package]

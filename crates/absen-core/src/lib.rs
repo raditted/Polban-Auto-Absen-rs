@@ -11,7 +11,7 @@ pub mod text;
 
 pub use client::{AbsenClient, ClientError, DumpError, LoginOutcome};
 pub use config::{Config, ConfigError};
-pub use engine::{response_indicates_success, run, EngineError};
+pub use engine::{response_indicates_success, run, run_with_commands, EngineCommand, EngineError};
 pub use event::{ChannelReporter, Event, Reporter, VecReporter};
 pub use model::{AbsenFormData, Action, Color, LogLevel, Skip, UserInfo};
 pub use state::{ClickedState, StateError};

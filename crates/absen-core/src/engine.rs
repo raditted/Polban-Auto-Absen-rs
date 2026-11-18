@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Local;
 use rand::Rng;
@@ -25,6 +25,12 @@ const FAILURE_MARKERS: [&[u8]; 8] = [
     b"invalid",
     b"false",
 ];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineCommand {
+    ScanNow,
+    Stop,
+}
 
 #[derive(Debug, Error)]
 pub enum EngineError {
@@ -126,27 +132,67 @@ impl JadwalTracker {
     }
 }
 
-fn interruptible_sleep(shutdown_rx: &Receiver<()>, duration: Duration) -> bool {
+#[derive(Clone, Copy)]
+enum CommandSource<'a> {
+    Shutdown(&'a Receiver<()>),
+    Commands(&'a Receiver<EngineCommand>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CountdownOutcome {
+    Elapsed,
+    ScanNow,
+    Stop,
+}
+
+/// Wait for `duration`, returning `true` if a stop/shutdown/disconnect signal is received.
+/// `EngineCommand::ScanNow` is ignored here without resetting the remaining wait duration.
+fn interruptible_sleep(source: CommandSource<'_>, duration: Duration) -> bool {
     if duration.is_zero() {
-        return matches!(
-            shutdown_rx.try_recv(),
-            Ok(()) | Err(TryRecvError::Disconnected)
-        );
+        return match source {
+            CommandSource::Shutdown(rx) => {
+                matches!(rx.try_recv(), Ok(()) | Err(TryRecvError::Disconnected))
+            }
+            CommandSource::Commands(rx) => loop {
+                match rx.try_recv() {
+                    Ok(EngineCommand::Stop) | Err(TryRecvError::Disconnected) => break true,
+                    Ok(EngineCommand::ScanNow) => continue,
+                    Err(TryRecvError::Empty) => break false,
+                }
+            },
+        };
     }
-    match shutdown_rx.recv_timeout(duration) {
-        Ok(()) | Err(RecvTimeoutError::Disconnected) => true,
-        Err(RecvTimeoutError::Timeout) => false,
+
+    match source {
+        CommandSource::Shutdown(rx) => matches!(
+            rx.recv_timeout(duration),
+            Ok(()) | Err(RecvTimeoutError::Disconnected)
+        ),
+        CommandSource::Commands(rx) => {
+            let deadline = Instant::now() + duration;
+            loop {
+                let rem = deadline.saturating_duration_since(Instant::now());
+                if rem.is_zero() {
+                    return false;
+                }
+                match rx.recv_timeout(rem) {
+                    Ok(EngineCommand::Stop) | Err(RecvTimeoutError::Disconnected) => return true,
+                    Ok(EngineCommand::ScanNow) => continue,
+                    Err(RecvTimeoutError::Timeout) => return false,
+                }
+            }
+        }
     }
 }
 
-fn jitter_sleep(cfg: &Config, shutdown_rx: &Receiver<()>) -> bool {
+fn jitter_sleep(cfg: &Config, source: CommandSource<'_>) -> bool {
     let (low, high) = if cfg.delay_min <= cfg.delay_max {
         (cfg.delay_min, cfg.delay_max)
     } else {
         (cfg.delay_max, cfg.delay_min)
     };
     if high <= 0.0 {
-        return interruptible_sleep(shutdown_rx, Duration::ZERO);
+        return interruptible_sleep(source, Duration::ZERO);
     }
     let low = low.max(0.0);
     let secs = if (high - low).abs() < f64::EPSILON {
@@ -154,25 +200,46 @@ fn jitter_sleep(cfg: &Config, shutdown_rx: &Receiver<()>) -> bool {
     } else {
         rand::thread_rng().gen_range(low..=high)
     };
-    interruptible_sleep(shutdown_rx, Duration::from_secs_f64(secs))
+    interruptible_sleep(source, Duration::from_secs_f64(secs))
 }
 
-fn retry_wait_sleep(cfg: &Config, shutdown_rx: &Receiver<()>) -> bool {
+fn retry_wait_sleep(cfg: &Config, source: CommandSource<'_>) -> bool {
     if cfg.retry_wait <= 0.0 {
-        return interruptible_sleep(shutdown_rx, Duration::ZERO);
+        return interruptible_sleep(source, Duration::ZERO);
     }
-    interruptible_sleep(shutdown_rx, Duration::from_secs_f64(cfg.retry_wait))
+    interruptible_sleep(source, Duration::from_secs_f64(cfg.retry_wait))
 }
 
-fn countdown_sleep(seconds: u64, reporter: &dyn Reporter, shutdown_rx: &Receiver<()>) -> bool {
+fn countdown_sleep(
+    seconds: u64,
+    reporter: &dyn Reporter,
+    source: CommandSource<'_>,
+) -> CountdownOutcome {
     for remaining in (1..=seconds).rev() {
         reporter.emit(Event::Countdown(remaining.min(u32::MAX as u64) as u32));
-        if interruptible_sleep(shutdown_rx, Duration::from_secs(1)) {
-            return true;
+        match source {
+            CommandSource::Shutdown(rx) => {
+                if matches!(
+                    rx.recv_timeout(Duration::from_secs(1)),
+                    Ok(()) | Err(RecvTimeoutError::Disconnected)
+                ) {
+                    return CountdownOutcome::Stop;
+                }
+            }
+            CommandSource::Commands(rx) => match rx.recv_timeout(Duration::from_secs(1)) {
+                Ok(EngineCommand::Stop) | Err(RecvTimeoutError::Disconnected) => {
+                    return CountdownOutcome::Stop;
+                }
+                Ok(EngineCommand::ScanNow) => {
+                    reporter.emit(Event::Countdown(0));
+                    return CountdownOutcome::ScanNow;
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+            },
         }
     }
     reporter.emit(Event::Countdown(0));
-    false
+    CountdownOutcome::Elapsed
 }
 
 fn perform_login(
@@ -274,7 +341,7 @@ fn run_once(
     clicked: &mut ClickedState,
     tracker: &mut JadwalTracker,
     reporter: &dyn Reporter,
-    shutdown_rx: &Receiver<()>,
+    source: CommandSource<'_>,
     pre_fetched_html: Option<String>,
     first_run: bool,
 ) -> Result<bool, ClientError> {
@@ -339,7 +406,7 @@ fn run_once(
     }
 
     for action in actions {
-        if interruptible_sleep(shutdown_rx, Duration::ZERO) {
+        if interruptible_sleep(source, Duration::ZERO) {
             return Ok(true);
         }
         if clicked.contains(&action.sig) {
@@ -354,7 +421,7 @@ fn run_once(
 
         let mut done = false;
         for attempt in 1..=cfg.max_retry {
-            if jitter_sleep(cfg, shutdown_rx) {
+            if jitter_sleep(cfg, source) {
                 return Ok(true);
             }
             let (status, body) = match client.post_absen(cfg, &action) {
@@ -373,7 +440,7 @@ fn run_once(
                 }
             };
 
-            if retry_wait_sleep(cfg, shutdown_rx) {
+            if retry_wait_sleep(cfg, source) {
                 return Ok(true);
             }
 
@@ -431,6 +498,39 @@ pub fn run(
     reporter: &dyn Reporter,
     shutdown_rx: &Receiver<()>,
 ) -> Result<(), EngineError> {
+    run_inner(
+        cfg,
+        client,
+        loop_mode,
+        reporter,
+        CommandSource::Shutdown(shutdown_rx),
+    )
+}
+
+/// Run the full HTTP attendance engine controlled by `EngineCommand` messages.
+pub fn run_with_commands(
+    cfg: &Config,
+    client: &AbsenClient,
+    loop_mode: bool,
+    reporter: &dyn Reporter,
+    cmd_rx: &Receiver<EngineCommand>,
+) -> Result<(), EngineError> {
+    run_inner(
+        cfg,
+        client,
+        loop_mode,
+        reporter,
+        CommandSource::Commands(cmd_rx),
+    )
+}
+
+fn run_inner(
+    cfg: &Config,
+    client: &AbsenClient,
+    loop_mode: bool,
+    reporter: &dyn Reporter,
+    source: CommandSource<'_>,
+) -> Result<(), EngineError> {
     reporter.emit(Event::Engine {
         name: cfg.engine.clone(),
         interval: cfg.interval,
@@ -467,7 +567,7 @@ pub fn run(
     let mut reusable_html = Some(initial_html);
 
     loop {
-        if interruptible_sleep(shutdown_rx, Duration::ZERO) {
+        if interruptible_sleep(source, Duration::ZERO) {
             break;
         }
         reporter.emit(Event::CycleIncrement);
@@ -477,7 +577,7 @@ pub fn run(
             &mut clicked,
             &mut tracker,
             reporter,
-            shutdown_rx,
+            source,
             reusable_html.take(),
             first,
         ) {
@@ -487,7 +587,7 @@ pub fn run(
         if !loop_mode {
             break;
         }
-        if countdown_sleep(cfg.interval, reporter, shutdown_rx) {
+        if countdown_sleep(cfg.interval, reporter, source) == CountdownOutcome::Stop {
             break;
         }
     }
@@ -513,5 +613,57 @@ mod tests {
         assert!(!response_indicates_success(200, "Sesi belum dibuka"));
         assert!(!response_indicates_success(200, "Invalid token"));
         assert!(!response_indicates_success(200, r#"{"ok":false}"#));
+    }
+
+    #[test]
+    fn interruptible_sleep_ignores_scan_now_without_cutting_duration_short() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(EngineCommand::ScanNow).unwrap();
+        let start = Instant::now();
+        let stopped = interruptible_sleep(CommandSource::Commands(&rx), Duration::from_millis(80));
+        let elapsed = start.elapsed();
+        assert!(!stopped);
+        assert!(
+            elapsed >= Duration::from_millis(65),
+            "ScanNow should not cut jitter/retry sleep short: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn interruptible_sleep_stops_immediately_on_stop_or_disconnect() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(EngineCommand::Stop).unwrap();
+        let start = Instant::now();
+        assert!(interruptible_sleep(
+            CommandSource::Commands(&rx),
+            Duration::from_secs(5)
+        ));
+        assert!(start.elapsed() < Duration::from_millis(100));
+
+        let (tx2, rx2) = std::sync::mpsc::channel::<EngineCommand>();
+        drop(tx2);
+        assert!(interruptible_sleep(
+            CommandSource::Commands(&rx2),
+            Duration::from_secs(5)
+        ));
+    }
+
+    #[test]
+    fn countdown_sleep_handles_scan_now_and_stop() {
+        use crate::event::VecReporter;
+
+        let reporter = VecReporter::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(EngineCommand::ScanNow).unwrap();
+        let outcome = countdown_sleep(30, &reporter, CommandSource::Commands(&rx));
+        assert_eq!(outcome, CountdownOutcome::ScanNow);
+        let events = reporter.snapshot();
+        assert_eq!(events.last(), Some(&Event::Countdown(0)));
+
+        let reporter2 = VecReporter::new();
+        let (tx2, rx2) = std::sync::mpsc::channel();
+        tx2.send(EngineCommand::Stop).unwrap();
+        let outcome2 = countdown_sleep(30, &reporter2, CommandSource::Commands(&rx2));
+        assert_eq!(outcome2, CountdownOutcome::Stop);
     }
 }
