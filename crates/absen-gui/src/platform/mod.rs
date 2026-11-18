@@ -6,4 +6,4 @@ pub mod tray;
 
 pub use autostart::AutostartManager;
 pub use notify::Notifier;
-pub use tray::{TrayCommand, TrayManager};
+pub use tray::{TrayCommand, TrayManager, TrayWaker};
