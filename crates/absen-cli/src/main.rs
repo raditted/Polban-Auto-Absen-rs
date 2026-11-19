@@ -4,7 +4,9 @@ mod dashboard;
 mod platform;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant};
 
 use absen_core::{AbsenClient, ChannelReporter, Config, DumpError, EngineError, Event};
 use anyhow::Context;
@@ -118,10 +120,20 @@ fn run_cli() -> anyhow::Result<i32> {
     let alt_screen = !cli.no_alt_screen && !cli.once;
     let loop_mode = !cli.once;
 
+    if tui::is_interactive_tty() {
+        platform::configure_console_window();
+    }
+
+    let shutdown_requested = Arc::new(AtomicBool::new(false));
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
     let ctrlc_tx = shutdown_tx.clone();
+    let ctrlc_requested = Arc::clone(&shutdown_requested);
     ctrlc::set_handler(move || {
+        let already = ctrlc_requested.swap(true, Ordering::SeqCst);
         let _ = ctrlc_tx.send(());
+        if already && !tui::is_terminal_active() {
+            std::process::exit(130);
+        }
     })
     .context("gagal memasang handler Ctrl+C")?;
 
@@ -175,9 +187,18 @@ fn run_cli() -> anyhow::Result<i32> {
         };
         tui::run_tui(event_rx, shutdown_tx, tui_opts).context("TUI error")?;
 
-        worker
-            .join()
-            .map_err(|_| anyhow::anyhow!("worker thread mengalami panic"))?
+        let deadline = Instant::now() + Duration::from_millis(1500);
+        while !worker.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if worker.is_finished() {
+            worker
+                .join()
+                .map_err(|_| anyhow::anyhow!("worker thread mengalami panic"))?
+        } else {
+            println!("[AutoAbsen] Dihentikan (koneksi HTTP latar belakang dibatalkan).");
+            return Ok(0);
+        }
     };
 
     match engine_res {

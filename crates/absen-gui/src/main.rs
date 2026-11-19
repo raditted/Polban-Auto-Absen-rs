@@ -3,7 +3,7 @@
 
 use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -20,6 +20,7 @@ enum SingleInstanceOutcome {
 struct SingleInstanceHandle {
     local_addr: Option<SocketAddr>,
     ui_ctx: Arc<Mutex<Option<egui::Context>>>,
+    win32_msg_hwnd: Arc<AtomicIsize>,
     show_flag: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
 }
@@ -38,10 +39,12 @@ fn acquire_single_instance_at(addr: &str) -> SingleInstanceOutcome {
         Ok(listener) => {
             let local_addr = listener.local_addr().ok();
             let ui_ctx: Arc<Mutex<Option<egui::Context>>> = Arc::new(Mutex::new(None));
+            let win32_msg_hwnd = Arc::new(AtomicIsize::new(0));
             let show_flag = Arc::new(AtomicBool::new(false));
             let shutdown = Arc::new(AtomicBool::new(false));
 
             let thread_ctx = Arc::clone(&ui_ctx);
+            let thread_msg_hwnd = Arc::clone(&win32_msg_hwnd);
             let thread_flag = Arc::clone(&show_flag);
             let thread_shutdown = Arc::clone(&shutdown);
 
@@ -57,6 +60,17 @@ fn acquire_single_instance_at(addr: &str) -> SingleInstanceOutcome {
                         let n = (&stream).read(&mut buf).unwrap_or(0);
                         if n == 0 || buf[..n].starts_with(b"SHOW") {
                             thread_flag.store(true, Ordering::Release);
+                            #[cfg(target_os = "windows")]
+                            {
+                                let msg_hwnd = thread_msg_hwnd.load(Ordering::Acquire);
+                                if msg_hwnd != 0 {
+                                    absen_gui::platform::win32::post_app_message(
+                                        msg_hwnd,
+                                        absen_gui::platform::win32::WM_APP_SHOW_WINDOW,
+                                    );
+                                }
+                            }
+                            let _ = &thread_msg_hwnd;
                             if let Ok(guard) = thread_ctx.lock() {
                                 if let Some(ctx) = guard.as_ref() {
                                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -76,6 +90,7 @@ fn acquire_single_instance_at(addr: &str) -> SingleInstanceOutcome {
             SingleInstanceOutcome::Primary(SingleInstanceHandle {
                 local_addr,
                 ui_ctx,
+                win32_msg_hwnd,
                 show_flag,
                 shutdown,
             })
@@ -172,16 +187,20 @@ fn main() -> eframe::Result<()> {
         SingleInstanceOutcome::Unavailable => None,
     };
 
-    let show_bridge = instance_guard
-        .as_ref()
-        .map(|h| (Arc::clone(&h.ui_ctx), Arc::clone(&h.show_flag)));
+    let show_bridge = instance_guard.as_ref().map(|h| {
+        (
+            Arc::clone(&h.ui_ctx),
+            Arc::clone(&h.win32_msg_hwnd),
+            Arc::clone(&h.show_flag),
+        )
+    });
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Polban Presensi")
-            .with_inner_size([980.0, 660.0])
-            .with_min_inner_size([420.0, 480.0])
-            .with_icon(icon::egui_icon(64, None)),
+            .with_inner_size([1040.0, 680.0])
+            .with_min_inner_size([640.0, 520.0])
+            .with_icon(icon::egui_icon(256, None)),
         ..Default::default()
     };
 
@@ -190,13 +209,18 @@ fn main() -> eframe::Result<()> {
         "Polban Presensi",
         options,
         Box::new(move |cc| {
-            if let Some((ctx_slot, _)) = &show_bridge {
+            if let Some((ctx_slot, _, _)) = &show_bridge {
                 if let Ok(mut guard) = ctx_slot.lock() {
                     *guard = Some(cc.egui_ctx.clone());
                 }
             }
             let mut app = DesktopApp::new(cc, start_minimized);
-            if let Some((_, flag)) = show_bridge {
+            if let Some((_, msg_hwnd_slot, flag)) = show_bridge {
+                #[cfg(target_os = "windows")]
+                if let Some(hwnd) = app.win32_msg_hwnd() {
+                    msg_hwnd_slot.store(hwnd, Ordering::Release);
+                }
+                let _ = &msg_hwnd_slot;
                 app.set_external_show_flag(flag);
             }
             Ok(Box::new(app))

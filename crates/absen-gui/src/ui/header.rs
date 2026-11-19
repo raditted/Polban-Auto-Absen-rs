@@ -1,12 +1,12 @@
-//! Header bar showing student identity, live engine status, countdown, and primary actions.
+//! Header bar showing student identity, live engine status, scannable metrics, and primary actions.
 
-use egui::{RichText, Vec2};
+use absen_core::Color;
+use egui::{Align, Layout, Pos2, RichText, Sense, Vec2};
 
 use crate::bridge::{EngineStatus, GuiSnapshot};
-use crate::prefs::ThemePreference;
 use crate::theme::{Palette, ThemeTokens};
 use crate::ui::{
-    action_button, icons, mono_text, sanitize_dash, semibold_text, status_badge, ButtonTone,
+    action_button, hairline_divider, icons, mono_text, semibold_text, status_badge, ButtonTone,
     SemanticTone,
 };
 
@@ -38,13 +38,15 @@ fn status_visuals(
     }
 }
 
-fn theme_meta(
-    pref: ThemePreference,
-) -> (fn(&egui::Painter, egui::Rect, egui::Color32), &'static str) {
-    match pref {
-        ThemePreference::System => (icons::draw_monitor, "Sistem"),
-        ThemePreference::Light => (icons::draw_sun, "Terang"),
-        ThemePreference::Dark => (icons::draw_moon, "Gelap"),
+fn portal_connection_label(status: EngineStatus, palette: &Palette) -> (egui::Color32, &'static str) {
+    match status {
+        EngineStatus::Monitoring | EngineStatus::ScanningNow => {
+            (palette.emerald_border, "Portal Terhubung")
+        }
+        EngineStatus::Connecting => (palette.blue_border, "Menghubungkan Portal"),
+        EngineStatus::AuthFailed => (palette.red_border, "Autentikasi Gagal"),
+        EngineStatus::NetworkError => (palette.red_border, "Gangguan Jaringan"),
+        EngineStatus::Idle | EngineStatus::Stopped => (palette.text_secondary, "Portal Siaga"),
     }
 }
 
@@ -64,22 +66,22 @@ fn identity_line(snapshot: &GuiSnapshot, configured_nim: &str) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
     snapshot: &GuiSnapshot,
     configured_nim: &str,
     interval_secs: u64,
-    theme_pref: ThemePreference,
+    is_dark: bool,
     palette: &Palette,
     width: f32,
 ) -> Option<HeaderAction> {
     let mut action = None;
-    let is_wide = width >= ThemeTokens::BREAKPOINT_WIDE;
+    let stacked_actions = width < ThemeTokens::BREAKPOINT_HEADER_STACK;
     let is_compact = width < ThemeTokens::BREAKPOINT_MEDIUM;
     let has_account = !configured_nim.trim().is_empty();
     let is_active = snapshot.status.is_active();
     let (tone, st_icon, st_label) = status_visuals(snapshot.status);
-    let (theme_icon, theme_label) = theme_meta(theme_pref);
 
     egui::Frame::none()
         .fill(palette.bg_surface)
@@ -93,481 +95,378 @@ pub fn show(
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
 
-            if is_wide {
-                show_wide_header(
-                    ui,
-                    snapshot,
-                    configured_nim,
-                    interval_secs,
-                    palette,
-                    has_account,
-                    is_active,
-                    (tone, st_icon, st_label),
-                    (theme_icon, theme_label),
-                    &mut action,
-                );
-            } else if !is_compact {
-                show_medium_header(
-                    ui,
-                    snapshot,
-                    configured_nim,
-                    palette,
-                    has_account,
-                    is_active,
-                    (tone, st_icon, st_label),
-                    (theme_icon, theme_label),
-                    &mut action,
-                );
+            if stacked_actions {
+                show_identity_block(ui, snapshot, configured_nim, palette, (tone, st_icon, st_label));
+                ui.add_space(ThemeTokens::SPACE_MD);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::splat(ThemeTokens::SPACE_SM);
+                    render_action_buttons(
+                        ui,
+                        palette,
+                        has_account,
+                        is_active,
+                        is_dark,
+                        &mut action,
+                    );
+                });
             } else {
-                show_compact_header(
-                    ui,
-                    snapshot,
-                    configured_nim,
-                    palette,
-                    has_account,
-                    is_active,
-                    (tone, st_icon, st_label),
-                    (theme_icon, theme_label),
-                    &mut action,
-                );
+                ui.horizontal(|ui| {
+                    let avail = ui.available_width();
+                    let actions_reserve = 385.0;
+                    let left_w = (avail - actions_reserve - ThemeTokens::SPACE_MD).max(200.0);
+
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(left_w, 0.0),
+                        Layout::top_down(Align::Min),
+                        |ui| {
+                            ui.set_max_width(left_w);
+                            show_identity_block(
+                                ui,
+                                snapshot,
+                                configured_nim,
+                                palette,
+                                (tone, st_icon, st_label),
+                            );
+                        },
+                    );
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = ThemeTokens::SPACE_SM;
+                        render_action_buttons_rtl(
+                            ui,
+                            palette,
+                            has_account,
+                            is_active,
+                            is_dark,
+                            &mut action,
+                        );
+                    });
+                });
             }
+
+            ui.add_space(ThemeTokens::SPACE_MD);
+            hairline_divider(ui, palette.border_subtle);
+            ui.add_space(ThemeTokens::SPACE_SM);
+
+            show_status_metric_strip(ui, snapshot, interval_secs, palette);
         });
 
     action
 }
 
-#[allow(clippy::too_many_arguments)]
-fn show_wide_header(
+fn show_identity_block(
     ui: &mut egui::Ui,
     snapshot: &GuiSnapshot,
     configured_nim: &str,
-    interval_secs: u64,
     palette: &Palette,
-    has_account: bool,
-    is_active: bool,
     status_info: (
         SemanticTone,
         fn(&egui::Painter, egui::Rect, egui::Color32),
         &str,
     ),
-    theme_info: (fn(&egui::Painter, egui::Rect, egui::Color32), &str),
-    action: &mut Option<HeaderAction>,
 ) {
     let (tone, st_icon, st_label) = status_info;
-    let (theme_icon, theme_label) = theme_info;
-
-    ui.horizontal(|ui| {
-        ui.vertical(|ui| {
-            ui.horizontal(|ui| {
-                ui.label(semibold_text("Polban Presensi", 18.0, palette.text_primary));
-                ui.add_space(ThemeTokens::SPACE_SM);
-                status_badge(ui, palette, tone, st_icon, st_label);
-            });
-            ui.add_space(ThemeTokens::SPACE_XS);
-            ui.label(
-                RichText::new(identity_line(snapshot, configured_nim))
-                    .size(12.5)
-                    .color(palette.text_secondary),
-            );
-        });
-
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = ThemeTokens::SPACE_SM;
-
-            if action_button(
-                ui,
-                palette,
-                ButtonTone::Secondary,
-                "Pengaturan",
-                Some(icons::draw_settings),
-                true,
-                0.0,
-            )
-            .clicked()
-            {
-                *action = Some(HeaderAction::OpenSettings);
-            }
-
-            if action_button(
-                ui,
-                palette,
-                ButtonTone::Secondary,
-                theme_label,
-                Some(theme_icon),
-                true,
-                0.0,
-            )
-            .on_hover_text("Ubah mode tema (Sistem, Terang, Gelap)")
-            .clicked()
-            {
-                *action = Some(HeaderAction::CycleTheme);
-            }
-
-            let scan_resp = action_button(
-                ui,
-                palette,
-                ButtonTone::Secondary,
-                "Cek Sekarang",
-                Some(icons::draw_refresh),
-                is_active,
-                0.0,
-            );
-            if scan_resp.clicked() {
-                *action = Some(HeaderAction::ScanNow);
-            } else if !is_active {
-                scan_resp.on_disabled_hover_text(
-                    "Mulai pemantauan terlebih dahulu untuk cek manual (F5)",
-                );
-            }
-
-            if is_active {
-                if action_button(
-                    ui,
-                    palette,
-                    ButtonTone::Danger,
-                    "Hentikan",
-                    Some(icons::draw_stop),
-                    true,
-                    0.0,
-                )
-                .clicked()
-                {
-                    *action = Some(HeaderAction::StopMonitoring);
-                }
-            } else {
-                let start_resp = action_button(
-                    ui,
-                    palette,
-                    ButtonTone::Primary,
-                    "Mulai Pantau",
-                    Some(icons::draw_play),
-                    has_account,
-                    0.0,
-                );
-                if start_resp.clicked() {
-                    *action = Some(HeaderAction::StartMonitoring);
-                } else if !has_account {
-                    start_resp.on_disabled_hover_text(
-                        "Masukkan NIM dan kata sandi pada kartu masuk terlebih dahulu",
-                    );
-                }
-            }
-
-            ui.add_space(ThemeTokens::SPACE_XS);
-            let metric_text = if is_active {
-                format!("{}s", snapshot.countdown_secs)
-            } else if snapshot.cycle > 0 {
-                format!("#{}", snapshot.cycle)
-            } else {
-                "Siaga".to_string()
-            };
-            ui.label(mono_text(
-                metric_text,
-                18.0,
-                if is_active {
-                    palette.accent_text
-                } else {
-                    palette.text_secondary
-                },
-            ));
-        });
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(ThemeTokens::SPACE_SM, ThemeTokens::SPACE_XS);
+        ui.label(semibold_text("Polban Presensi", 18.0, palette.text_primary));
+        status_badge(ui, palette, tone, st_icon, st_label);
     });
-
-    ui.add_space(ThemeTokens::SPACE_MD);
-    ui.painter().line_segment(
-        [
-            egui::pos2(ui.min_rect().left(), ui.cursor().top()),
-            egui::pos2(ui.max_rect().right(), ui.cursor().top()),
-        ],
-        egui::Stroke::new(1.0_f32, palette.border_subtle),
+    ui.add_space(3.0);
+    ui.add(
+        egui::Label::new(
+            RichText::new(identity_line(snapshot, configured_nim))
+                .size(12.5)
+                .color(palette.text_secondary),
+        )
+        .wrap(),
     );
-    ui.add_space(ThemeTokens::SPACE_SM);
+}
+
+fn render_theme_button(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    is_dark: bool,
+    action: &mut Option<HeaderAction>,
+) {
+    let (icon_fn, tooltip) = if is_dark {
+        (
+            icons::draw_sun as fn(&egui::Painter, egui::Rect, egui::Color32),
+            "Ubah ke Mode Terang",
+        )
+    } else {
+        (
+            icons::draw_moon as fn(&egui::Painter, egui::Rect, egui::Color32),
+            "Ubah ke Mode Gelap",
+        )
+    };
+    if action_button(
+        ui,
+        palette,
+        ButtonTone::Secondary,
+        "",
+        Some(icon_fn),
+        true,
+        0.0,
+    )
+    .on_hover_text(tooltip)
+    .clicked()
+    {
+        *action = Some(HeaderAction::CycleTheme);
+    }
+}
+
+fn render_action_buttons(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    has_account: bool,
+    is_active: bool,
+    is_dark: bool,
+    action: &mut Option<HeaderAction>,
+) {
+    if is_active {
+        if action_button(
+            ui,
+            palette,
+            ButtonTone::Danger,
+            "Hentikan",
+            Some(icons::draw_stop),
+            true,
+            0.0,
+        )
+        .clicked()
+        {
+            *action = Some(HeaderAction::StopMonitoring);
+        }
+    } else {
+        let start_resp = action_button(
+            ui,
+            palette,
+            ButtonTone::Primary,
+            "Mulai Pantau",
+            Some(icons::draw_play),
+            has_account,
+            0.0,
+        );
+        if start_resp.clicked() {
+            *action = Some(HeaderAction::StartMonitoring);
+        } else if !has_account {
+            start_resp.on_disabled_hover_text(
+                "Masukkan NIM dan kata sandi pada kartu masuk terlebih dahulu",
+            );
+        }
+    }
+
+    let scan_resp = action_button(
+        ui,
+        palette,
+        ButtonTone::Secondary,
+        "Cek Sekarang",
+        Some(icons::draw_refresh),
+        is_active,
+        0.0,
+    );
+    if scan_resp.clicked() {
+        *action = Some(HeaderAction::ScanNow);
+    } else if !is_active {
+        scan_resp.on_disabled_hover_text("Mulai pemantauan terlebih dahulu untuk cek manual (F5)");
+    }
+
+    render_theme_button(ui, palette, is_dark, action);
+
+    if action_button(
+        ui,
+        palette,
+        ButtonTone::Secondary,
+        "Pengaturan",
+        Some(icons::draw_settings),
+        true,
+        0.0,
+    )
+    .clicked()
+    {
+        *action = Some(HeaderAction::OpenSettings);
+    }
+}
+
+fn render_action_buttons_rtl(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    has_account: bool,
+    is_active: bool,
+    is_dark: bool,
+    action: &mut Option<HeaderAction>,
+) {
+    if action_button(
+        ui,
+        palette,
+        ButtonTone::Secondary,
+        "Pengaturan",
+        Some(icons::draw_settings),
+        true,
+        0.0,
+    )
+    .clicked()
+    {
+        *action = Some(HeaderAction::OpenSettings);
+    }
+
+    render_theme_button(ui, palette, is_dark, action);
+
+    let scan_resp = action_button(
+        ui,
+        palette,
+        ButtonTone::Secondary,
+        "Cek Sekarang",
+        Some(icons::draw_refresh),
+        is_active,
+        0.0,
+    );
+    if scan_resp.clicked() {
+        *action = Some(HeaderAction::ScanNow);
+    } else if !is_active {
+        scan_resp.on_disabled_hover_text("Mulai pemantauan terlebih dahulu untuk cek manual (F5)");
+    }
+
+    if is_active {
+        if action_button(
+            ui,
+            palette,
+            ButtonTone::Danger,
+            "Hentikan",
+            Some(icons::draw_stop),
+            true,
+            0.0,
+        )
+        .clicked()
+        {
+            *action = Some(HeaderAction::StopMonitoring);
+        }
+    } else {
+        let start_resp = action_button(
+            ui,
+            palette,
+            ButtonTone::Primary,
+            "Mulai Pantau",
+            Some(icons::draw_play),
+            has_account,
+            0.0,
+        );
+        if start_resp.clicked() {
+            *action = Some(HeaderAction::StartMonitoring);
+        } else if !has_account {
+            start_resp.on_disabled_hover_text(
+                "Masukkan NIM dan kata sandi pada kartu masuk terlebih dahulu",
+            );
+        }
+    }
+}
+
+fn metric_separator(ui: &mut egui::Ui, palette: &Palette) {
+    ui.label(RichText::new("·").size(12.5).color(palette.text_secondary));
+}
+
+fn show_status_metric_strip(
+    ui: &mut egui::Ui,
+    snapshot: &GuiSnapshot,
+    interval_secs: u64,
+    palette: &Palette,
+) {
+    let (dot_color, portal_text) = portal_connection_label(snapshot.status, palette);
+    let green_count = snapshot
+        .courses
+        .iter()
+        .filter(|c| c.color == Color::Green)
+        .count();
+    let total_courses = snapshot.courses.len();
+    let eff_interval = if snapshot.interval_secs > 0 {
+        snapshot.interval_secs
+    } else {
+        interval_secs
+    };
 
     ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = ThemeTokens::SPACE_LG;
-        let last_scan = if snapshot.last_scan.is_empty() {
-            "Belum ada".to_string()
-        } else {
-            sanitize_dash(&snapshot.last_scan).into_owned()
-        };
-        let eff_interval = if snapshot.interval_secs > 0 {
-            snapshot.interval_secs
-        } else {
-            interval_secs
-        };
-        ui.label(mono_text(
-            format!("Siklus: {}", snapshot.cycle),
-            12.0,
-            palette.text_secondary,
-        ));
-        ui.label(mono_text(
-            format!("Terakhir cek: {last_scan}"),
-            12.0,
-            palette.text_secondary,
-        ));
-        ui.label(mono_text(
-            format!("Interval: {eff_interval}d"),
-            12.0,
-            palette.text_secondary,
-        ));
-        if !snapshot.auth_status.is_empty() {
+        ui.spacing_mut().item_spacing = Vec2::new(ThemeTokens::SPACE_SM, 4.0);
+
+        // Portal connection indicator with crisp status dot
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let (dot_rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+            if ui.is_rect_visible(dot_rect) {
+                ui.painter().circle_filled(
+                    Pos2::new(dot_rect.center().x, dot_rect.center().y),
+                    3.8,
+                    dot_color,
+                );
+            }
+            ui.label(semibold_text(portal_text, 12.0, palette.text_primary));
+        });
+
+        if total_courses > 0 {
+            metric_separator(ui, palette);
             ui.label(
-                RichText::new(format!("Portal: {}", sanitize_dash(&snapshot.auth_status)))
+                RichText::new(format!("Hadir {green_count}/{total_courses}"))
                     .size(12.0)
                     .color(palette.text_secondary),
             );
         }
-    });
-}
 
-#[allow(clippy::too_many_arguments)]
-fn show_medium_header(
-    ui: &mut egui::Ui,
-    snapshot: &GuiSnapshot,
-    configured_nim: &str,
-    palette: &Palette,
-    has_account: bool,
-    is_active: bool,
-    status_info: (
-        SemanticTone,
-        fn(&egui::Painter, egui::Rect, egui::Color32),
-        &str,
-    ),
-    theme_info: (fn(&egui::Painter, egui::Rect, egui::Color32), &str),
-    action: &mut Option<HeaderAction>,
-) {
-    let (tone, st_icon, st_label) = status_info;
-    let (theme_icon, theme_label) = theme_info;
-
-    ui.horizontal(|ui| {
-        ui.vertical(|ui| {
-            ui.label(semibold_text("Polban Presensi", 18.0, palette.text_primary));
+        if snapshot.status.is_active() {
+            metric_separator(ui, palette);
+            if snapshot.status == EngineStatus::ScanningNow {
+                ui.label(semibold_text(
+                    "Memindai sekarang...",
+                    12.0,
+                    palette.accent_text,
+                ));
+            } else {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    icons::paint_icon(ui, 12.0, palette.accent_text, icons::draw_clock);
+                    ui.label(
+                        RichText::new("Cek berikutnya")
+                            .size(12.0)
+                            .color(palette.text_secondary),
+                    );
+                    ui.label(mono_text(
+                        format!("{} dtk", snapshot.countdown_secs),
+                        12.0,
+                        palette.accent_text,
+                    ));
+                });
+            }
+        } else if eff_interval > 0 {
+            metric_separator(ui, palette);
             ui.label(
-                RichText::new(identity_line(snapshot, configured_nim))
-                    .size(12.5)
+                RichText::new(format!("Interval {eff_interval} dtk"))
+                    .size(12.0)
                     .color(palette.text_secondary),
             );
-        });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            status_badge(ui, palette, tone, st_icon, st_label);
-            if is_active {
-                ui.add_space(ThemeTokens::SPACE_SM);
+        }
+
+        if !snapshot.last_scan.is_empty() {
+            metric_separator(ui, palette);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.label(
+                    RichText::new("Terakhir")
+                        .size(12.0)
+                        .color(palette.text_secondary),
+                );
                 ui.label(mono_text(
-                    format!("{}s", snapshot.countdown_secs),
-                    17.0,
-                    palette.accent_text,
+                    &snapshot.last_scan,
+                    12.0,
+                    palette.text_primary,
                 ));
-            }
-        });
-    });
-
-    ui.add_space(ThemeTokens::SPACE_MD);
-
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = Vec2::splat(ThemeTokens::SPACE_SM);
-        if is_active {
-            if action_button(
-                ui,
-                palette,
-                ButtonTone::Danger,
-                "Hentikan",
-                Some(icons::draw_stop),
-                true,
-                0.0,
-            )
-            .clicked()
-            {
-                *action = Some(HeaderAction::StopMonitoring);
-            }
-        } else if action_button(
-            ui,
-            palette,
-            ButtonTone::Primary,
-            "Mulai Pantau",
-            Some(icons::draw_play),
-            has_account,
-            0.0,
-        )
-        .clicked()
-        {
-            *action = Some(HeaderAction::StartMonitoring);
+            });
         }
 
-        if action_button(
-            ui,
-            palette,
-            ButtonTone::Secondary,
-            "Cek Sekarang",
-            Some(icons::draw_refresh),
-            is_active,
-            0.0,
-        )
-        .clicked()
-        {
-            *action = Some(HeaderAction::ScanNow);
-        }
-
-        if action_button(
-            ui,
-            palette,
-            ButtonTone::Secondary,
-            theme_label,
-            Some(theme_icon),
-            true,
-            0.0,
-        )
-        .clicked()
-        {
-            *action = Some(HeaderAction::CycleTheme);
-        }
-
-        if action_button(
-            ui,
-            palette,
-            ButtonTone::Secondary,
-            "Pengaturan",
-            Some(icons::draw_settings),
-            true,
-            0.0,
-        )
-        .clicked()
-        {
-            *action = Some(HeaderAction::OpenSettings);
-        }
-    });
-}
-
-#[allow(clippy::too_many_arguments)]
-fn show_compact_header(
-    ui: &mut egui::Ui,
-    snapshot: &GuiSnapshot,
-    configured_nim: &str,
-    palette: &Palette,
-    has_account: bool,
-    is_active: bool,
-    status_info: (
-        SemanticTone,
-        fn(&egui::Painter, egui::Rect, egui::Color32),
-        &str,
-    ),
-    theme_info: (fn(&egui::Painter, egui::Rect, egui::Color32), &str),
-    action: &mut Option<HeaderAction>,
-) {
-    let (tone, st_icon, st_label) = status_info;
-    let (theme_icon, theme_label) = theme_info;
-    let avail = ui.available_width();
-
-    ui.horizontal(|ui| {
-        ui.vertical(|ui| {
-            ui.label(semibold_text("Polban Presensi", 16.5, palette.text_primary));
-            let short_id = match &snapshot.user {
-                Some(u) if !u.nim.is_empty() => format!("NIM {}", u.nim),
-                _ if !configured_nim.trim().is_empty() => format!("NIM {}", configured_nim.trim()),
-                _ => "Portal Polban".to_string(),
-            };
-            ui.label(mono_text(short_id, 12.0, palette.text_secondary));
-        });
-
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = ThemeTokens::SPACE_SM;
-            if action_button(
-                ui,
-                palette,
-                ButtonTone::Secondary,
-                "",
-                Some(icons::draw_settings),
-                true,
-                ThemeTokens::MIN_TARGET_HEIGHT,
-            )
-            .on_hover_text("Pengaturan (Ctrl+,)")
-            .clicked()
-            {
-                *action = Some(HeaderAction::OpenSettings);
-            }
-
-            if action_button(
-                ui,
-                palette,
-                ButtonTone::Secondary,
-                "",
-                Some(theme_icon),
-                true,
-                ThemeTokens::MIN_TARGET_HEIGHT,
-            )
-            .on_hover_text(format!("Tema: {theme_label}"))
-            .clicked()
-            {
-                *action = Some(HeaderAction::CycleTheme);
-            }
-        });
-    });
-
-    ui.add_space(ThemeTokens::SPACE_SM);
-
-    ui.horizontal(|ui| {
-        status_badge(ui, palette, tone, st_icon, st_label);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if is_active {
-                ui.label(mono_text(
-                    format!("{}s", snapshot.countdown_secs),
-                    15.0,
-                    palette.accent_text,
-                ));
-            } else if !snapshot.last_scan.is_empty() {
-                ui.label(mono_text(
-                    snapshot.last_scan.clone(),
-                    11.5,
-                    palette.text_secondary,
-                ));
-            }
-        });
-    });
-
-    ui.add_space(ThemeTokens::SPACE_SM);
-
-    let half_w = ((avail - ThemeTokens::SPACE_SM) * 0.5).max(120.0);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = ThemeTokens::SPACE_SM;
-        if is_active {
-            if action_button(
-                ui,
-                palette,
-                ButtonTone::Danger,
-                "Hentikan",
-                Some(icons::draw_stop),
-                true,
-                half_w,
-            )
-            .clicked()
-            {
-                *action = Some(HeaderAction::StopMonitoring);
-            }
-        } else if action_button(
-            ui,
-            palette,
-            ButtonTone::Primary,
-            "Mulai Pantau",
-            Some(icons::draw_play),
-            has_account,
-            half_w,
-        )
-        .clicked()
-        {
-            *action = Some(HeaderAction::StartMonitoring);
-        }
-
-        if action_button(
-            ui,
-            palette,
-            ButtonTone::Secondary,
-            "Cek Sekarang",
-            Some(icons::draw_refresh),
-            is_active,
-            half_w,
-        )
-        .clicked()
-        {
-            *action = Some(HeaderAction::ScanNow);
+        if snapshot.cycle > 0 {
+            metric_separator(ui, palette);
+            ui.label(mono_text(
+                format!("Siklus #{}", snapshot.cycle),
+                12.0,
+                palette.text_secondary,
+            ));
         }
     });
 }

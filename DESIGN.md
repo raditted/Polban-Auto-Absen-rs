@@ -56,6 +56,41 @@ Core palette uses three neutral steps (`bg_canvas`, `bg_surface`, `bg_subtle`), 
 
 **R-31 Color Rationale**: Neutral slate backgrounds paired with Polban Cobalt (`#1D4ED8`) anchor institutional identity while reserving saturated Emerald, Amber, and Red exclusively for actionable attendance states.
 
+### 2.4 Appearance Presets (Antigravity Light & Dark Theme Catalog)
+
+In addition to `Default Light` and `Default Dark`, users can select independent Light Theme and Dark Theme presets from the Antigravity catalog in **Pengaturan > Tema Tampilan**. Each preset card surfaces its active `Preset` selector alongside read-only `Background` (`bg_surface`), `Foreground` (`text_primary`), and `Accent` (`accent`) color swatch pills with uppercase `#HEX` codes. Every single preset is unit-tested against all R-25 WCAG 2.x AA contrast thresholds (`>= 4.5:1` for primary/secondary/accent/status text and `on_accent`, `>= 3.0:1` for interactive/focus/status borders).
+
+#### Light Theme Presets (7)
+
+| Preset | Background (`bg_surface`) | Foreground (`text_primary`) | Accent (`accent`) | Canvas (`bg_canvas`) | WCAG 2.x AA Verification |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Default Light** | `#FFFFFF` | `#0F172A` | `#1D4ED8` | `#F8FAFC` | Text `>= 4.5:1`, UI/Borders `>= 3.0:1` |
+| **Legacy Light** | `#FFFFFF` | `#111827` | `#005FB8` | `#F3F4F6` | Text `>= 4.5:1`, UI/Borders `>= 3.0:1` |
+| **Catppuccin** | `#EFF1F5` | `#4C4F69` | `#1E66F5` | `#E6E9EF` | Text `>= 4.5:1`, UI/Borders `>= 3.0:1` |
+| **Everforest** | `#FDF6E3` | `#3A464C` | `#3F6E1E` | `#F4F0D9` | Text `>= 4.5:1`, UI/Borders `>= 3.0:1` |
+| **Gruvbox Material** | `#FBF1C7` | `#3C3836` | `#AF3A03` | `#F2E5BC` | Text `>= 4.5:1`, UI/Borders `>= 3.0:1` |
+| **One Light** | `#FAFAFA` | `#383A42` | `#2F5AF3` | `#F0F0F1` | Text `>= 4.5:1`, UI/Borders `>= 3.0:1` |
+| **Solarized Light** | `#FDF6E3` | `#073642` | `#17649E` | `#F5EFDC` | Text `>= 4.5:1`, UI/Borders `>= 3.0:1` |
+
+#### Dark Theme Presets (12)
+
+| Preset | Background (`bg_surface`) | Foreground (`text_primary`) | Accent (`accent`) | Canvas (`bg_canvas`) | WCAG 2.x AA Verification |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Default Dark** | `#111827` | `#F8FAFC` | `#1D4ED8` | `#0B1120` | Text `>= 4.5:1`, UI/Borders `>= 3.0:1` |
+| **Legacy Dark** | `#1E1E1E` | `#D4D4D4` | `#3794FF` | `#161618` | Text `>= 4.5:1`, UI/Borders `>= 3.0:1` |
+| **Catppuccin** | `#1E1E2E` | `#CDD6F4` | `#CBA6F7` | `#181825` | Text `>= 4.5:1`, UI/Borders `>= 3.0:1` |
+| **Dracula** | `#282A36` | `#F8F8F2` | `#BD93F9` | `#1E1F29` | Text `>= 4.5:1`, UI/Borders `>= 3.0:1` |
+| **Everforest** | `#2D353B` | `#D3C6AA` | `#A7C080` | `#232A2E` | Text `>= 4.5:1`, UI/Borders `>= 3.0:1` |
+| **Gruvbox Material** | `#282828` | `#D4BE98` | `#A9B665` | `#1D2021` | Text `>= 4.5:1`, UI/Borders `>= 3.0:1` |
+| **Monokai** | `#272822` | `#F8F8F2` | `#A6E22E` | `#1E1F1C` | Text `>= 4.5:1`, UI/Borders `>= 3.0:1` |
+| **Nord** | `#2E3440` | `#ECEFF4` | `#88C0D0` | `#242933` | Text `>= 4.5:1`, UI/Borders `>= 3.0:1` |
+| **One Dark Pro** | `#282C34` | `#DCDFE4` | `#61AFEF` | `#21252B` | Text `>= 4.5:1`, UI/Borders `>= 3.0:1` |
+| **Tokyo Night** | `#1A1B26` | `#C0CAF5` | `#7AA2F7` | `#16161E` | Text `>= 4.5:1`, UI/Borders `>= 3.0:1` |
+| **Solarized Dark** | `#002B36` | `#FDF6E3` | `#2EB8AC` | `#00212B` | Text `>= 4.5:1`, UI/Borders `>= 3.0:1` |
+| **Vesper** | `#101010` | `#FFFFFF` | `#FFC799` | `#0B0B0B` | Text `>= 4.5:1`, UI/Borders `>= 3.0:1` |
+
+**R-31 Appearance Presets Rationale**: Decoupling Light and Dark preset choices (`LightThemePreset` and `DarkThemePreset`) while displaying live `Background`, `Foreground`, and `Accent` `#HEX` token pills lets students align the app with their editor environment and OS day/night schedule without sacrificing WCAG AA legibility.
+
 ---
 
 ## 3. Typography & Font Bundling

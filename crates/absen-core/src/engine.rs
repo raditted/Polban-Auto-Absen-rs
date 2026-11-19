@@ -145,6 +145,25 @@ enum CountdownOutcome {
     Stop,
 }
 
+const MAX_SLEEP_SECS: f64 = 86_400.0;
+
+fn sanitize_delay_secs(secs: f64) -> f64 {
+    if !secs.is_finite() || secs <= 0.0 {
+        0.0
+    } else {
+        secs.min(MAX_SLEEP_SECS)
+    }
+}
+
+fn safe_duration_from_secs(secs: f64) -> Duration {
+    let clean = sanitize_delay_secs(secs);
+    if clean <= 0.0 {
+        Duration::ZERO
+    } else {
+        Duration::try_from_secs_f64(clean).unwrap_or(Duration::ZERO)
+    }
+}
+
 /// Wait for `duration`, returning `true` if a stop/shutdown/disconnect signal is received.
 /// `EngineCommand::ScanNow` is ignored here without resetting the remaining wait duration.
 fn interruptible_sleep(source: CommandSource<'_>, duration: Duration) -> bool {
@@ -169,7 +188,32 @@ fn interruptible_sleep(source: CommandSource<'_>, duration: Duration) -> bool {
             Ok(()) | Err(RecvTimeoutError::Disconnected)
         ),
         CommandSource::Commands(rx) => {
-            let deadline = Instant::now() + duration;
+            let Some(deadline) = Instant::now().checked_add(duration) else {
+                // Duration overflowed Instant; wait in bounded chunks without panicking.
+                let mut remaining = duration;
+                let max_chunk = Duration::from_secs(3600);
+                while !remaining.is_zero() {
+                    let slice = remaining.min(max_chunk);
+                    let Some(chunk_deadline) = Instant::now().checked_add(slice) else {
+                        return false;
+                    };
+                    loop {
+                        let rem = chunk_deadline.saturating_duration_since(Instant::now());
+                        if rem.is_zero() {
+                            break;
+                        }
+                        match rx.recv_timeout(rem) {
+                            Ok(EngineCommand::Stop) | Err(RecvTimeoutError::Disconnected) => {
+                                return true;
+                            }
+                            Ok(EngineCommand::ScanNow) => continue,
+                            Err(RecvTimeoutError::Timeout) => break,
+                        }
+                    }
+                    remaining = remaining.saturating_sub(slice);
+                }
+                return false;
+            };
             loop {
                 let rem = deadline.saturating_duration_since(Instant::now());
                 if rem.is_zero() {
@@ -186,28 +230,26 @@ fn interruptible_sleep(source: CommandSource<'_>, duration: Duration) -> bool {
 }
 
 fn jitter_sleep(cfg: &Config, source: CommandSource<'_>) -> bool {
-    let (low, high) = if cfg.delay_min <= cfg.delay_max {
-        (cfg.delay_min, cfg.delay_max)
+    let min_clean = sanitize_delay_secs(cfg.delay_min);
+    let max_clean = sanitize_delay_secs(cfg.delay_max);
+    let (low, high) = if min_clean <= max_clean {
+        (min_clean, max_clean)
     } else {
-        (cfg.delay_max, cfg.delay_min)
+        (max_clean, min_clean)
     };
     if high <= 0.0 {
         return interruptible_sleep(source, Duration::ZERO);
     }
-    let low = low.max(0.0);
-    let secs = if (high - low).abs() < f64::EPSILON {
+    let secs = if (high - low) <= f64::EPSILON {
         low
     } else {
         rand::thread_rng().gen_range(low..=high)
     };
-    interruptible_sleep(source, Duration::from_secs_f64(secs))
+    interruptible_sleep(source, safe_duration_from_secs(secs))
 }
 
 fn retry_wait_sleep(cfg: &Config, source: CommandSource<'_>) -> bool {
-    if cfg.retry_wait <= 0.0 {
-        return interruptible_sleep(source, Duration::ZERO);
-    }
-    interruptible_sleep(source, Duration::from_secs_f64(cfg.retry_wait))
+    interruptible_sleep(source, safe_duration_from_secs(cfg.retry_wait))
 }
 
 fn countdown_sleep(
@@ -665,5 +707,58 @@ mod tests {
         tx2.send(EngineCommand::Stop).unwrap();
         let outcome2 = countdown_sleep(30, &reporter2, CommandSource::Commands(&rx2));
         assert_eq!(outcome2, CountdownOutcome::Stop);
+    }
+
+    #[test]
+    fn jitter_and_retry_sleep_handle_nan_inf_negative_without_panicking() {
+        let mut cfg = Config {
+            username: String::new(),
+            password: String::new(),
+            base_url: crate::config::DEFAULT_BASE_URL.into(),
+            target_url: format!("{}/ajar/absen", crate::config::DEFAULT_BASE_URL),
+            interval: 60,
+            delay_min: f64::NAN,
+            delay_max: f64::INFINITY,
+            max_retry: 1,
+            retry_wait: f64::NAN,
+            engine: "http".into(),
+            env_path_used: None,
+            state_file: std::path::PathBuf::from(".clicked.json"),
+        };
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(EngineCommand::Stop).unwrap();
+        // Even with NaN/Inf/negative values, none of these should panic.
+        assert!(jitter_sleep(&cfg, CommandSource::Commands(&rx)));
+        tx.send(EngineCommand::Stop).unwrap();
+        assert!(retry_wait_sleep(&cfg, CommandSource::Commands(&rx)));
+
+        // Also verify NaN/Inf with no Stop signal completes immediately (sanitized to 0s)
+        let (_tx_idle, rx_idle) = std::sync::mpsc::channel::<EngineCommand>();
+        assert!(!jitter_sleep(&cfg, CommandSource::Commands(&rx_idle)));
+        assert!(!retry_wait_sleep(&cfg, CommandSource::Commands(&rx_idle)));
+
+        cfg.delay_min = -5.0;
+        cfg.delay_max = -1.0;
+        cfg.retry_wait = f64::NEG_INFINITY;
+        let (_tx2, rx2) = std::sync::mpsc::channel();
+        assert!(!jitter_sleep(&cfg, CommandSource::Shutdown(&rx2)));
+        assert!(!retry_wait_sleep(&cfg, CommandSource::Shutdown(&rx2)));
+
+        cfg.delay_min = f64::MAX;
+        cfg.delay_max = f64::MAX;
+        cfg.retry_wait = f64::MAX;
+        let (tx3, rx3) = std::sync::mpsc::channel();
+        tx3.send(EngineCommand::Stop).unwrap();
+        assert!(jitter_sleep(&cfg, CommandSource::Commands(&rx3)));
+        tx3.send(EngineCommand::Stop).unwrap();
+        assert!(retry_wait_sleep(&cfg, CommandSource::Commands(&rx3)));
+    }
+
+    #[test]
+    fn truncate_str_respects_utf8_boundaries() {
+        assert_eq!(truncate_str("Pemrograman — Lanjut 🚀", 15), "Pemrograman — L");
+        assert_eq!(truncate_str("Pendidikan Pancasila", 100), "Pendidikan Pancasila");
+        assert_eq!(truncate_str("ééé", 2), "éé");
     }
 }

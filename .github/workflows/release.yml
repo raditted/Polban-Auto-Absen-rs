@@ -177,6 +177,13 @@ jobs:
               mkdir -p "${APP_DIR}/Contents/MacOS"
               cp "target/${{ matrix.target }}/release/polban-absen-gui" "${APP_DIR}/Contents/MacOS/polban-absen-gui"
               chmod +x "${APP_DIR}/Contents/MacOS/polban-absen-gui"
+              mkdir -p "${APP_DIR}/Contents/Resources" icon.iconset
+              for s in 16 32 128 256 512; do
+                sips -z $s $s assets/app-icon.png --out "icon.iconset/icon_${s}x${s}.png" >/dev/null
+                sips -z $((s*2)) $((s*2)) assets/app-icon.png --out "icon.iconset/icon_${s}x${s}@2x.png" >/dev/null
+              done
+              iconutil -c icns icon.iconset -o "${APP_DIR}/Contents/Resources/app-icon.icns"
+              rm -rf icon.iconset
               cat > "${APP_DIR}/Contents/Info.plist" <<'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -192,6 +199,8 @@ jobs:
             <string>3.0.0</string>
             <key>CFBundleShortVersionString</key>
             <string>3.0.0</string>
+            <key>CFBundleIconFile</key>
+            <string>app-icon</string>
             <key>CFBundleExecutable</key>
             <string>polban-absen-gui</string>
             <key>CFBundlePackageType</key>
@@ -209,17 +218,19 @@ jobs:
               STAGE_DIR="$(mktemp -d)"
               cp "target/${{ matrix.target }}/release/polban-absen-gui" "${STAGE_DIR}/polban-absen-gui"
               chmod +x "${STAGE_DIR}/polban-absen-gui"
+              cp assets/app-icon.png "${STAGE_DIR}/polban-presensi.png"
               cat > "${STAGE_DIR}/polban-presensi.desktop" <<'DESKTOP'
           [Desktop Entry]
           Type=Application
           Name=Polban Presensi
           Comment=Pemantau dan pencatat presensi akademik Polban
           Exec=polban-absen-gui
+          Icon=polban-presensi
           Terminal=false
           Categories=Education;Utility;
           StartupNotify=true
           DESKTOP
-              tar -czf "dist/${{ matrix.asset }}" -C "${STAGE_DIR}" polban-absen-gui polban-presensi.desktop
+              tar -czf "dist/${{ matrix.asset }}" -C "${STAGE_DIR}" polban-absen-gui polban-presensi.desktop polban-presensi.png
               rm -rf "${STAGE_DIR}"
               ;;
           esac

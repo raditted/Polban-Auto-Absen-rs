@@ -69,6 +69,98 @@ pub fn print_ascii_banner() {
     println!();
 }
 
+/// Best-effort console title and icon setup on Windows (`conhost.exe`).
+///
+/// Safe and non-failing: if no console window or embedded icon resource is present
+/// (for example under headless test runners or Windows Terminal), this is a no-op.
+#[cfg(windows)]
+pub fn configure_console_window() {
+    use std::ffi::c_void;
+
+    const IMAGE_ICON: u32 = 1;
+    const LR_DEFAULTSIZE: u32 = 0x0000_0040;
+    const LR_SHARED: u32 = 0x0000_8000;
+    const WM_SETICON: u32 = 0x0080;
+    const ICON_SMALL: usize = 0;
+    const ICON_BIG: usize = 1;
+    const SMTO_ABORTIFHUNG: u32 = 0x0002;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetConsoleWindow() -> *mut c_void;
+        fn GetModuleHandleW(lp_module_name: *const u16) -> *mut c_void;
+        fn SetConsoleTitleW(lp_console_title: *const u16) -> i32;
+    }
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn LoadImageW(
+            h_inst: *mut c_void,
+            name: *const u16,
+            r#type: u32,
+            cx: i32,
+            cy: i32,
+            fu_load: u32,
+        ) -> *mut c_void;
+        fn SendMessageTimeoutW(
+            h_wnd: *mut c_void,
+            msg: u32,
+            w_param: usize,
+            l_param: isize,
+            fu_flags: u32,
+            u_timeout: u32,
+            lpdw_result: *mut usize,
+        ) -> isize;
+    }
+
+    let title: Vec<u16> = "Polban Auto Absen\0".encode_utf16().collect();
+    unsafe {
+        let _ = SetConsoleTitleW(title.as_ptr());
+        let hwnd = GetConsoleWindow();
+        if hwnd.is_null() {
+            return;
+        }
+        let hinst = GetModuleHandleW(std::ptr::null());
+        if hinst.is_null() {
+            return;
+        }
+        // Resource ID 1 matches `winresource` (`1 ICON "../../assets/app-icon.ico"`).
+        let hicon = LoadImageW(
+            hinst,
+            std::ptr::without_provenance::<u16>(1),
+            IMAGE_ICON,
+            0,
+            0,
+            LR_DEFAULTSIZE | LR_SHARED,
+        );
+        if hicon.is_null() {
+            return;
+        }
+        let mut result: usize = 0;
+        let _ = SendMessageTimeoutW(
+            hwnd,
+            WM_SETICON,
+            ICON_SMALL,
+            hicon as isize,
+            SMTO_ABORTIFHUNG,
+            200,
+            &mut result,
+        );
+        let _ = SendMessageTimeoutW(
+            hwnd,
+            WM_SETICON,
+            ICON_BIG,
+            hicon as isize,
+            SMTO_ABORTIFHUNG,
+            200,
+            &mut result,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+pub fn configure_console_window() {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,5 +176,10 @@ mod tests {
         let sub = subtitle();
         assert!(sub.starts_with("Polban Auto Absen -- "));
         assert!(sub.ends_with(" v3.0"));
+    }
+
+    #[test]
+    fn configure_console_window_is_safe_and_non_panicking() {
+        configure_console_window();
     }
 }

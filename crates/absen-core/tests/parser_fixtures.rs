@@ -116,3 +116,53 @@ fn differentiates_same_course_by_lecturer_and_uses_fallback_table() {
     assert_eq!(actions[1].data.dsn, "BD011N");
     assert_eq!(nama_dosen(&actions[1].dosen), "Ana-Maria");
 }
+
+#[test]
+fn parses_unicode_and_short_rows_safely_without_panicking() {
+    let html = r#"<!DOCTYPE html>
+<html><body>
+  <div class="user-header">251511002 Éka Pratama — Kelas D4-Teknik Informatika</div>
+  <table id="jadwal">
+    <tbody>
+      <tr>
+        <td>1</td>
+        <td><button class="btn btn-primary">Absen</button></td>
+      </tr>
+      <tr>
+        <td>2</td>
+        <td>KO099N-Dr. Ångström — Tim Pengajar, M.Kom</td>
+        <td>25IF999</td>
+        <td>Pemrograman Berorientasi Objek — Lanjut 🚀</td>
+        <td>P</td>
+        <td>4</td>
+        <td>6</td>
+        <td>09:30:00 s.d. 12:00:00</td>
+        <td><button class="btn btn-info">Absen</button></td>
+      </tr>
+    </tbody>
+  </table>
+</body></html>"#;
+
+    let info = parse_user_header(html, "fallback");
+    assert_eq!(info.nim, "251511002");
+    assert_eq!(info.nama, "Éka Pratama — Kelas");
+    assert_eq!(info.jurusan, "D4-Teknik Informatika");
+
+    let (actions, skips) = find_rows(html, ENDPOINT);
+    assert!(skips.is_empty());
+    assert_eq!(actions.len(), 2);
+    assert_eq!(actions[0].nama_mk, "");
+    assert_eq!(
+        actions[1].nama_mk,
+        "Pemrograman Berorientasi Objek — Lanjut 🚀"
+    );
+    assert_eq!(
+        nama_dosen(&actions[1].dosen),
+        "Dr. Ångström — Tim Pengajar, M.Kom"
+    );
+
+    assert_eq!(find_rows("", ENDPOINT), (vec![], vec![]));
+    let empty_hdr = parse_user_header(r#"<div class="user-header">   </div>"#, "251511001");
+    assert_eq!(empty_hdr.nim, "251511001");
+    assert_eq!(empty_hdr.nama, "");
+}

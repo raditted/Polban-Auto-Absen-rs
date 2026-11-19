@@ -121,10 +121,13 @@ impl Config {
         let target_url = explicit_target.unwrap_or_else(|| format!("{base_url}/ajar/absen"));
 
         let interval = parse_or_default(&env_map, "POLBAN_INTERVAL", DEFAULT_INTERVAL)?;
-        let delay_min = parse_or_default(&env_map, "POLBAN_DELAY_MIN", DEFAULT_DELAY_MIN)?;
-        let delay_max = parse_or_default(&env_map, "POLBAN_DELAY_MAX", DEFAULT_DELAY_MAX)?;
+        let delay_min =
+            parse_non_negative_finite_f64(&env_map, "POLBAN_DELAY_MIN", DEFAULT_DELAY_MIN)?;
+        let delay_max =
+            parse_non_negative_finite_f64(&env_map, "POLBAN_DELAY_MAX", DEFAULT_DELAY_MAX)?;
         let max_retry = parse_or_default(&env_map, "POLBAN_MAX_RETRY", DEFAULT_MAX_RETRY)?;
-        let retry_wait = parse_or_default(&env_map, "POLBAN_RETRY_WAIT", DEFAULT_RETRY_WAIT)?;
+        let retry_wait =
+            parse_non_negative_finite_f64(&env_map, "POLBAN_RETRY_WAIT", DEFAULT_RETRY_WAIT)?;
         let engine = env_map
             .get("POLBAN_ENGINE")
             .map(|s| s.trim().to_string())
@@ -238,6 +241,23 @@ fn parse_or_default<T: std::str::FromStr>(
             key,
             value: raw.to_string(),
         }),
+    }
+}
+
+fn parse_non_negative_finite_f64(
+    env_map: &HashMap<String, String>,
+    key: &'static str,
+    default: f64,
+) -> Result<f64, ConfigError> {
+    match env_map.get(key).map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        None => Ok(default),
+        Some(raw) => match raw.parse::<f64>() {
+            Ok(val) if val.is_finite() && val >= 0.0 => Ok(val),
+            _ => Err(ConfigError::InvalidValue {
+                key,
+                value: raw.to_string(),
+            }),
+        },
     }
 }
 
@@ -360,5 +380,22 @@ INVALID_LINE_NO_EQ
             cfg.absen_endpoint(),
             "http://127.0.0.1:4567/ajar/absen/absensi_awal"
         );
+    }
+
+    #[test]
+    fn rejects_non_finite_or_negative_delay_values() {
+        for key in ["POLBAN_DELAY_MIN", "POLBAN_DELAY_MAX", "POLBAN_RETRY_WAIT"] {
+            for bad in ["NaN", "inf", "-inf", "-0.5"] {
+                let mut env_map = HashMap::new();
+                env_map.insert(key.into(), bad.into());
+                let err =
+                    Config::load_from_candidates(&[], env_map, PathBuf::from(".clicked.json"))
+                        .unwrap_err();
+                assert!(
+                    matches!(err, ConfigError::InvalidValue { key: k, .. } if k == key),
+                    "expected InvalidValue for {key}={bad}, got {err:?}"
+                );
+            }
+        }
     }
 }

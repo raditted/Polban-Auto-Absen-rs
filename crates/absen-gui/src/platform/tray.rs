@@ -18,7 +18,7 @@ pub enum TrayCommand {
     Quit,
 }
 
-/// Optional callback invoked on the background event thread when a tray command arrives.
+/// Optional callback invoked when a tray event enqueues a `TrayCommand`.
 pub type TrayWaker = Arc<dyn Fn(TrayCommand) + Send + Sync>;
 
 #[derive(Default)]
@@ -32,6 +32,41 @@ struct GlobalTrayRouter {
     waker: Option<TrayWaker>,
 }
 
+impl GlobalTrayRouter {
+    fn command_for_menu_id(&self, id: &MenuId) -> Option<TrayCommand> {
+        if self.show_id.as_ref() == Some(id) {
+            Some(TrayCommand::ShowWindow)
+        } else if self.toggle_id.as_ref() == Some(id) {
+            Some(TrayCommand::ToggleMonitoring)
+        } else if self.scan_id.as_ref() == Some(id) {
+            Some(TrayCommand::ScanNow)
+        } else if self.quit_id.as_ref() == Some(id) {
+            Some(TrayCommand::Quit)
+        } else {
+            None
+        }
+    }
+
+    fn command_for_tray_event(&self, event: &TrayIconEvent) -> Option<TrayCommand> {
+        let matches_action = matches!(
+            event,
+            TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } | TrayIconEvent::DoubleClick {
+                button: MouseButton::Left,
+                ..
+            }
+        );
+        if matches_action && self.tray_id.as_ref() == Some(event.id()) {
+            Some(TrayCommand::ShowWindow)
+        } else {
+            None
+        }
+    }
+}
+
 static ROUTER: OnceLock<Mutex<GlobalTrayRouter>> = OnceLock::new();
 static HANDLERS_INIT: Once = Once::new();
 
@@ -42,7 +77,10 @@ fn router() -> &'static Mutex<GlobalTrayRouter> {
 fn dispatch_tray_command(cmd: TrayCommand) {
     let (tx, waker) = match router().lock() {
         Ok(guard) => (guard.tx.clone(), guard.waker.clone()),
-        Err(_) => return,
+        Err(poisoned) => {
+            let guard = poisoned.into_inner();
+            (guard.tx.clone(), guard.waker.clone())
+        }
     };
     if let Some(tx) = tx {
         let _ = tx.send(cmd);
@@ -56,20 +94,8 @@ fn ensure_handlers_registered() {
     HANDLERS_INIT.call_once(|| {
         MenuEvent::set_event_handler(Some(|event: MenuEvent| {
             let cmd = match router().lock() {
-                Ok(guard) => {
-                    if guard.show_id.as_ref() == Some(&event.id) {
-                        Some(TrayCommand::ShowWindow)
-                    } else if guard.toggle_id.as_ref() == Some(&event.id) {
-                        Some(TrayCommand::ToggleMonitoring)
-                    } else if guard.scan_id.as_ref() == Some(&event.id) {
-                        Some(TrayCommand::ScanNow)
-                    } else if guard.quit_id.as_ref() == Some(&event.id) {
-                        Some(TrayCommand::Quit)
-                    } else {
-                        None
-                    }
-                }
-                Err(_) => None,
+                Ok(guard) => guard.command_for_menu_id(&event.id),
+                Err(poisoned) => poisoned.into_inner().command_for_menu_id(&event.id),
             };
             if let Some(cmd) = cmd {
                 dispatch_tray_command(cmd);
@@ -77,26 +103,12 @@ fn ensure_handlers_registered() {
         }));
 
         TrayIconEvent::set_event_handler(Some(|event: TrayIconEvent| {
-            let matches_action = matches!(
-                &event,
-                TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    ..
-                } | TrayIconEvent::DoubleClick {
-                    button: MouseButton::Left,
-                    ..
-                }
-            );
-            if !matches_action {
-                return;
-            }
-            let is_our_icon = router()
-                .lock()
-                .map(|g| g.tray_id.as_ref() == Some(event.id()))
-                .unwrap_or(false);
-            if is_our_icon {
-                dispatch_tray_command(TrayCommand::ShowWindow);
+            let cmd = match router().lock() {
+                Ok(guard) => guard.command_for_tray_event(&event),
+                Err(poisoned) => poisoned.into_inner().command_for_tray_event(&event),
+            };
+            if let Some(cmd) = cmd {
+                dispatch_tray_command(cmd);
             }
         }));
     });
@@ -133,6 +145,8 @@ impl TrayManager {
         #[cfg(target_os = "linux")]
         gtk::init().map_err(|e| format!("Gagal inisialisasi GTK untuk tray: {e}"))?;
 
+        ensure_handlers_registered();
+
         let show_item = MenuItem::new("Buka Polban Presensi", true, None);
         let toggle_item = MenuItem::new("Mulai Pemantauan", true, None);
         let scan_item = MenuItem::new("Cek Sekarang", true, None);
@@ -153,16 +167,15 @@ impl TrayManager {
             .map_err(|e| format!("Gagal membuat ikon system tray: {e}"))?;
 
         let (tx, rx) = mpsc::channel();
-        if let Ok(mut guard) = router().lock() {
-            guard.tray_id = Some(tray_icon.id().clone());
-            guard.show_id = Some(show_item.id().clone());
-            guard.toggle_id = Some(toggle_item.id().clone());
-            guard.scan_id = Some(scan_item.id().clone());
-            guard.quit_id = Some(quit_item.id().clone());
-            guard.tx = Some(tx);
-            guard.waker = None;
-        }
-        ensure_handlers_registered();
+        let mut guard = router().lock().unwrap_or_else(|e| e.into_inner());
+        guard.tray_id = Some(tray_icon.id().clone());
+        guard.show_id = Some(show_item.id().clone());
+        guard.toggle_id = Some(toggle_item.id().clone());
+        guard.scan_id = Some(scan_item.id().clone());
+        guard.quit_id = Some(quit_item.id().clone());
+        guard.tx = Some(tx);
+        guard.waker = None;
+        drop(guard);
 
         Ok(Self {
             tray_icon,
@@ -175,9 +188,8 @@ impl TrayManager {
 
     /// Register a custom callback invoked whenever a tray event enqueues a `TrayCommand`.
     pub fn set_waker(&mut self, waker: TrayWaker) {
-        if let Ok(mut guard) = router().lock() {
-            guard.waker = Some(waker);
-        }
+        let mut guard = router().lock().unwrap_or_else(|e| e.into_inner());
+        guard.waker = Some(waker);
     }
 
     /// Register an `egui::Context` waker that immediately shows/focuses the window
@@ -218,9 +230,7 @@ impl TrayManager {
 
     /// Drain all pending tray commands without blocking.
     pub fn poll_commands(&self) -> Vec<TrayCommand> {
-        let Ok(guard) = self.rx.lock() else {
-            return Vec::new();
-        };
+        let guard = self.rx.lock().unwrap_or_else(|e| e.into_inner());
         let mut cmds = Vec::new();
         while let Ok(cmd) = guard.try_recv() {
             cmds.push(cmd);
@@ -240,6 +250,9 @@ impl TrayManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tray_icon::dpi::PhysicalPosition;
+    use tray_icon::Rect;
 
     #[test]
     fn tooltip_text_contains_no_em_dash_or_double_dash() {
@@ -257,5 +270,100 @@ mod tests {
         for status in [IconStatus::Idle, IconStatus::Monitoring, IconStatus::Error] {
             assert!(build_tray_icon_image(status).is_ok());
         }
+    }
+
+    #[test]
+    fn router_maps_menu_ids_and_tray_clicks_accurately() {
+        let router = GlobalTrayRouter {
+            tray_id: Some(TrayIconId::new("tray-main")),
+            show_id: Some(MenuId::new("show")),
+            toggle_id: Some(MenuId::new("toggle")),
+            scan_id: Some(MenuId::new("scan")),
+            quit_id: Some(MenuId::new("quit")),
+            tx: None,
+            waker: None,
+        };
+
+        assert_eq!(
+            router.command_for_menu_id(&MenuId::new("show")),
+            Some(TrayCommand::ShowWindow)
+        );
+        assert_eq!(
+            router.command_for_menu_id(&MenuId::new("toggle")),
+            Some(TrayCommand::ToggleMonitoring)
+        );
+        assert_eq!(
+            router.command_for_menu_id(&MenuId::new("scan")),
+            Some(TrayCommand::ScanNow)
+        );
+        assert_eq!(
+            router.command_for_menu_id(&MenuId::new("quit")),
+            Some(TrayCommand::Quit)
+        );
+        assert_eq!(router.command_for_menu_id(&MenuId::new("unknown")), None);
+
+        let left_up = TrayIconEvent::Click {
+            id: TrayIconId::new("tray-main"),
+            position: PhysicalPosition::default(),
+            rect: Rect::default(),
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+        };
+        assert_eq!(
+            router.command_for_tray_event(&left_up),
+            Some(TrayCommand::ShowWindow)
+        );
+
+        let left_dbl = TrayIconEvent::DoubleClick {
+            id: TrayIconId::new("tray-main"),
+            position: PhysicalPosition::default(),
+            rect: Rect::default(),
+            button: MouseButton::Left,
+        };
+        assert_eq!(
+            router.command_for_tray_event(&left_dbl),
+            Some(TrayCommand::ShowWindow)
+        );
+
+        let right_up = TrayIconEvent::Click {
+            id: TrayIconId::new("tray-main"),
+            position: PhysicalPosition::default(),
+            rect: Rect::default(),
+            button: MouseButton::Right,
+            button_state: MouseButtonState::Up,
+        };
+        assert_eq!(router.command_for_tray_event(&right_up), None);
+
+        let other_icon = TrayIconEvent::Click {
+            id: TrayIconId::new("other"),
+            position: PhysicalPosition::default(),
+            rect: Rect::default(),
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+        };
+        assert_eq!(router.command_for_tray_event(&other_icon), None);
+    }
+
+    #[test]
+    fn dispatch_tray_command_delivers_to_channel_and_waker() {
+        let (tx, rx) = mpsc::channel();
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let wakes_clone = Arc::clone(&wakes);
+
+        {
+            let mut guard = router().lock().unwrap_or_else(|e| e.into_inner());
+            guard.tx = Some(tx);
+            guard.waker = Some(Arc::new(move |_| {
+                wakes_clone.fetch_add(1, Ordering::SeqCst);
+            }));
+        }
+
+        dispatch_tray_command(TrayCommand::Quit);
+        assert_eq!(rx.try_recv().ok(), Some(TrayCommand::Quit));
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+
+        let mut guard = router().lock().unwrap_or_else(|e| e.into_inner());
+        guard.tx = None;
+        guard.waker = None;
     }
 }

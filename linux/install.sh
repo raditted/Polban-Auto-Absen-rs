@@ -144,12 +144,21 @@ if [ "$GUI_READY" -eq 1 ]; then
     APP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
     mkdir -p "$APP_DIR"
     DESKTOP_FILE="$APP_DIR/polban-presensi.desktop"
+    ICON_OUT="polban-presensi"
+    ICON_SRC="$SCRIPT_DIR/../assets/app-icon.png"
+    if [ -f "$ICON_SRC" ]; then
+      ICON_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/512x512/apps"
+      mkdir -p "$ICON_DIR"
+      cp "$ICON_SRC" "$ICON_DIR/polban-presensi.png"
+      ICON_OUT="$ICON_DIR/polban-presensi.png"
+    fi
     cat > "$DESKTOP_FILE" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Polban Presensi
 Comment=Pemantau dan pencatat presensi akademik Polban
 Exec=${GUI_BIN_OUT}
+Icon=${ICON_OUT}
 Terminal=false
 Categories=Education;Utility;
 StartupNotify=true

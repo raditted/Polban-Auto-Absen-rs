@@ -12,7 +12,7 @@ use egui::{Color32, CursorIcon, FontFamily, Pos2, Rect, RichText, Rounding, Sens
 
 use crate::theme::{Palette, ThemeTokens};
 
-/// Active tab when viewport width is in the Compact breakpoint (`< 580px`).
+/// Active tab when viewport width is below the wide split breakpoint (kept for API compatibility).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CompactTab {
     #[default]
@@ -45,7 +45,7 @@ impl SemanticTone {
             Self::Neutral => (
                 palette.text_secondary,
                 palette.bg_subtle,
-                palette.border_interactive,
+                palette.border_subtle,
             ),
         }
     }
@@ -57,6 +57,7 @@ pub enum ButtonTone {
     Primary,
     Secondary,
     Danger,
+    Ghost,
 }
 
 /// Sanitize any legacy double-hyphen separator into `": "` per R-02.
@@ -85,9 +86,24 @@ pub fn mono_text(text: impl Into<String>, size: f32, color: Color32) -> RichText
         .color(color)
 }
 
+/// Draw a full-width 1px hairline horizontal divider.
+pub fn hairline_divider(ui: &mut egui::Ui, color: Color32) {
+    let avail_w = ui.available_width().max(1.0);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(avail_w, 1.0), Sense::hover());
+    if ui.is_rect_visible(rect) {
+        ui.painter().line_segment(
+            [
+                Pos2::new(rect.left(), rect.center().y),
+                Pos2::new(rect.right(), rect.center().y),
+            ],
+            Stroke::new(1.0_f32, color),
+        );
+    }
+}
+
 /// Draw a high-contrast 2px keyboard focus ring around `response` when focused.
 pub fn paint_focus_ring(
-    ui: &egui::Ui,
+    ui: &mut egui::Ui,
     response: &egui::Response,
     palette: &Palette,
     rounding: f32,
@@ -101,7 +117,7 @@ pub fn paint_focus_ring(
     }
 }
 
-/// Render an accessible action button with minimum 44px height, optional vector icon,
+/// Render an accessible action button with consistent height, optional vector icon,
 /// clear disabled appearance, pointing/not-allowed cursor, and keyboard focus ring.
 pub fn action_button(
     ui: &mut egui::Ui,
@@ -113,7 +129,7 @@ pub fn action_button(
     min_width: f32,
 ) -> egui::Response {
     let inner = ui.add_enabled_ui(enabled, |ui| {
-        let text_size = 13.5_f32;
+        let text_size = 13.0_f32;
         let galley = ui.painter().layout_no_wrap(
             label.to_string(),
             egui::FontId::new(
@@ -122,18 +138,17 @@ pub fn action_button(
             ),
             palette.text_primary,
         );
-        let icon_w = if icon_fn.is_some() { 16.0 } else { 0.0 };
+        let icon_w = if icon_fn.is_some() { 15.0 } else { 0.0 };
         let icon_gap = if icon_fn.is_some() && !label.is_empty() {
             ThemeTokens::SPACE_SM
         } else {
             0.0
         };
-        let pad_x = if label.is_empty() {
-            ThemeTokens::SPACE_MD
+        let desired_w = if label.is_empty() {
+            ThemeTokens::MIN_TARGET_HEIGHT.max(min_width)
         } else {
-            ThemeTokens::SPACE_LG
+            (ThemeTokens::SPACE_LG * 2.0 + icon_w + icon_gap + galley.size().x).max(min_width)
         };
-        let desired_w = (pad_x * 2.0 + icon_w + icon_gap + galley.size().x).max(min_width);
         let desired_size = Vec2::new(desired_w, ThemeTokens::MIN_TARGET_HEIGHT);
 
         let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click());
@@ -176,7 +191,7 @@ pub fn action_button(
                         } else {
                             palette.border_interactive
                         };
-                        (bg, Stroke::new(1.2_f32, stroke_color), palette.text_primary)
+                        (bg, Stroke::new(1.1_f32, stroke_color), palette.text_primary)
                     }
                     ButtonTone::Danger => {
                         let bg = if hovered || pressed {
@@ -186,9 +201,17 @@ pub fn action_button(
                         };
                         (
                             bg,
-                            Stroke::new(1.2_f32, palette.red_border),
+                            Stroke::new(1.1_f32, palette.red_border),
                             palette.red_text,
                         )
+                    }
+                    ButtonTone::Ghost => {
+                        let bg = if hovered || pressed {
+                            palette.bg_subtle
+                        } else {
+                            Color32::TRANSPARENT
+                        };
+                        (bg, Stroke::NONE, palette.text_secondary)
                     }
                 }
             };
@@ -228,33 +251,45 @@ pub fn action_button(
     inner.inner
 }
 
-/// Render a 4px-radius status badge pairing a vector icon and text label (never color alone).
+/// Compute the rendered width of `status_badge` so callers can reserve exact space without overlap.
+pub fn status_badge_width(ui: &egui::Ui, label: &str) -> f32 {
+    let galley = ui.painter().layout_no_wrap(
+        label.to_string(),
+        egui::FontId::new(
+            11.5,
+            FontFamily::Name(ThemeTokens::FONT_SEMIBOLD_FAMILY.into()),
+        ),
+        Color32::WHITE,
+    );
+    // Horizontal padding (2 * 8) + icon (12) + gap (5) + text + safety margin (2)
+    ThemeTokens::SPACE_SM * 2.0 + 12.0 + 5.0 + galley.size().x + 2.0
+}
+
+/// Render a compact pill status badge pairing a vector icon and text label (never color alone).
 pub fn status_badge(
     ui: &mut egui::Ui,
     palette: &Palette,
     tone: SemanticTone,
     icon_fn: fn(&egui::Painter, Rect, Color32),
     label: &str,
-) {
+) -> egui::Response {
     let (fg, bg, border) = tone.colors(palette);
     egui::Frame::none()
         .fill(bg)
         .stroke(Stroke::new(1.0_f32, border))
         .rounding(Rounding::same(ThemeTokens::RADIUS_TAG))
-        .inner_margin(egui::Margin::symmetric(
-            ThemeTokens::SPACE_SM,
-            ThemeTokens::SPACE_XS,
-        ))
+        .inner_margin(egui::Margin::symmetric(ThemeTokens::SPACE_SM, 4.0))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = ThemeTokens::SPACE_XS;
-                icons::paint_icon(ui, 13.0, fg, icon_fn);
+                ui.spacing_mut().item_spacing.x = 5.0;
+                icons::paint_icon(ui, 12.0, fg, icon_fn);
                 ui.label(semibold_text(label, 11.5, fg));
             });
-        });
+        })
+        .response
 }
 
-/// Render a labeled single-line text input with >= 44px height, 6px rounding, and focus ring.
+/// Render a labeled single-line text input with consistent 40px height, 8px rounding, and focus ring.
 pub fn labeled_text_input(
     ui: &mut egui::Ui,
     palette: &Palette,
@@ -265,11 +300,11 @@ pub fn labeled_text_input(
     width: f32,
 ) -> egui::Response {
     ui.label(semibold_text(label, 12.5, palette.text_primary));
-    ui.add_space(ThemeTokens::SPACE_XS);
+    ui.add_space(5.0);
     let mut edit = egui::TextEdit::singleline(value)
         .hint_text(RichText::new(hint).color(palette.text_secondary))
         .desired_width(width)
-        .margin(egui::Margin::symmetric(ThemeTokens::SPACE_MD, 12.0));
+        .margin(egui::Margin::symmetric(ThemeTokens::SPACE_MD, 10.0));
     if monospace {
         edit = edit.font(egui::FontId::new(13.0, FontFamily::Monospace));
     } else {
@@ -282,20 +317,105 @@ pub fn labeled_text_input(
     response
 }
 
-/// Render a full-row accessible toggle control with >= 44px hit area and focus ring.
-pub fn toggle_row(
+/// Function pointer signature for procedural vector icon painters.
+pub type IconPaintFn = fn(&egui::Painter, Rect, Color32);
+
+/// Render a 3-way pill segmented control; returns the newly selected index if clicked.
+pub fn segmented_control<const N: usize>(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    selected: usize,
+    options: [(&str, IconPaintFn); N],
+) -> Option<usize> {
+    let mut clicked_idx = None;
+    let total_w = ui.available_width();
+    let pad = 4.0;
+    let inner_w = (total_w - pad * 2.0).max(120.0);
+    let seg_w = inner_w / (N as f32);
+    let seg_h = 34.0;
+
+    egui::Frame::none()
+        .fill(palette.bg_subtle)
+        .stroke(Stroke::new(1.0_f32, palette.border_subtle))
+        .rounding(Rounding::same(ThemeTokens::RADIUS_CARD))
+        .inner_margin(egui::Margin::same(pad))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                for (idx, (label, icon_fn)) in options.into_iter().enumerate() {
+                    let is_active = idx == selected;
+                    let (rect, resp) =
+                        ui.allocate_exact_size(Vec2::new(seg_w, seg_h), Sense::click());
+                    let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
+                    if resp.clicked() {
+                        clicked_idx = Some(idx);
+                    }
+                    if ui.is_rect_visible(rect) {
+                        let (fill, border, fg) = if is_active {
+                            (
+                                palette.bg_surface,
+                                Stroke::new(1.0_f32, palette.border_interactive),
+                                palette.accent_text,
+                            )
+                        } else if resp.hovered() {
+                            (
+                                palette.bg_surface.linear_multiply(0.7),
+                                Stroke::NONE,
+                                palette.text_primary,
+                            )
+                        } else {
+                            (Color32::TRANSPARENT, Stroke::NONE, palette.text_secondary)
+                        };
+                        ui.painter().rect(
+                            rect,
+                            Rounding::same(ThemeTokens::RADIUS_CONTROL - 1.0),
+                            fill,
+                            border,
+                        );
+
+                        let galley = ui.painter().layout_no_wrap(
+                            label.to_string(),
+                            egui::FontId::new(
+                                12.5,
+                                FontFamily::Name(ThemeTokens::FONT_SEMIBOLD_FAMILY.into()),
+                            ),
+                            fg,
+                        );
+                        let icon_w = 14.0;
+                        let gap = 6.0;
+                        let total_content = icon_w + gap + galley.size().x;
+                        let start_x = rect.center().x - total_content * 0.5;
+                        let icon_rect = Rect::from_center_size(
+                            Pos2::new(start_x + icon_w * 0.5, rect.center().y),
+                            Vec2::splat(icon_w),
+                        );
+                        icon_fn(ui.painter(), icon_rect, fg);
+                        ui.painter().galley(
+                            Pos2::new(
+                                start_x + icon_w + gap,
+                                rect.center().y - galley.size().y * 0.5,
+                            ),
+                            galley,
+                            fg,
+                        );
+                        paint_focus_ring(ui, &resp, palette, ThemeTokens::RADIUS_CONTROL - 1.0);
+                    }
+                }
+            });
+        });
+
+    clicked_idx
+}
+
+/// Render a clean settings toggle row with a custom pill switch on the right (no outer card border).
+pub fn switch_row(
     ui: &mut egui::Ui,
     palette: &Palette,
     checked: &mut bool,
     label: &str,
-    helper: Option<&str>,
 ) -> egui::Response {
     let row_w = ui.available_width();
-    let row_h = if helper.is_some() {
-        54.0
-    } else {
-        ThemeTokens::MIN_TARGET_HEIGHT
-    };
+    let row_h = 44.0;
     let (rect, response) = ui.allocate_exact_size(Vec2::new(row_w, row_h), Sense::click());
     let response = response.on_hover_cursor(CursorIcon::PointingHand);
     if response.clicked() {
@@ -303,74 +423,54 @@ pub fn toggle_row(
     }
 
     if ui.is_rect_visible(rect) {
-        let fill = if response.hovered() {
-            palette.bg_subtle
-        } else {
-            palette.bg_surface
-        };
-        let border_col = if response.hovered() {
-            palette.accent_text
-        } else {
-            palette.border_subtle
-        };
-        ui.painter().rect(
-            rect,
-            Rounding::same(ThemeTokens::RADIUS_CONTROL),
-            fill,
-            Stroke::new(1.0_f32, border_col),
-        );
-
-        let box_rect = Rect::from_center_size(
-            Pos2::new(rect.left() + ThemeTokens::SPACE_LG + 9.0, rect.center().y),
-            Vec2::splat(18.0),
-        );
-        let (box_fill, box_border) = if *checked {
-            (palette.accent, palette.accent)
-        } else {
-            (palette.bg_surface, palette.border_interactive)
-        };
-        ui.painter().rect(
-            box_rect,
-            Rounding::same(ThemeTokens::RADIUS_TAG),
-            box_fill,
-            Stroke::new(1.5_f32, box_border),
-        );
-        if *checked {
-            icons::draw_check(ui.painter(), box_rect, palette.on_accent);
+        if response.hovered() {
+            ui.painter()
+                .rect_filled(rect, Rounding::ZERO, palette.bg_subtle);
         }
 
-        let text_left = box_rect.right() + ThemeTokens::SPACE_MD;
-        let max_text_w = (rect.right() - ThemeTokens::SPACE_MD - text_left).max(40.0);
+        let switch_w = 38.0;
+        let switch_h = 22.0;
+        let right_pad = ThemeTokens::SPACE_MD;
+        let left_pad = ThemeTokens::SPACE_MD;
+        let switch_rect = Rect::from_center_size(
+            Pos2::new(rect.right() - right_pad - switch_w * 0.5, rect.center().y),
+            Vec2::new(switch_w, switch_h),
+        );
+
+        let max_text_w = (switch_rect.left() - ThemeTokens::SPACE_MD - (rect.left() + left_pad))
+            .max(60.0);
         let label_galley = ui.painter().layout(
             label.to_string(),
             egui::FontId::new(13.0, FontFamily::Proportional),
             palette.text_primary,
             max_text_w,
         );
-        if let Some(help) = helper {
-            let help_galley = ui.painter().layout(
-                help.to_string(),
-                egui::FontId::new(11.5, FontFamily::Proportional),
-                palette.text_secondary,
-                max_text_w,
-            );
-            let total_h = label_galley.size().y + 2.0 + help_galley.size().y;
-            let top_y = rect.center().y - total_h * 0.5;
-            ui.painter().galley(
-                Pos2::new(text_left, top_y),
-                label_galley.clone(),
-                palette.text_primary,
-            );
-            ui.painter().galley(
-                Pos2::new(text_left, top_y + label_galley.size().y + 2.0),
-                help_galley,
-                palette.text_secondary,
-            );
+        let text_y = rect.center().y - label_galley.size().y * 0.5;
+        ui.painter().galley(
+            Pos2::new(rect.left() + left_pad, text_y),
+            label_galley,
+            palette.text_primary,
+        );
+
+        let track_fill = if *checked {
+            palette.accent
         } else {
-            let y = rect.center().y - label_galley.size().y * 0.5;
-            ui.painter()
-                .galley(Pos2::new(text_left, y), label_galley, palette.text_primary);
-        }
+            palette.border_interactive
+        };
+        ui.painter()
+            .rect_filled(switch_rect, Rounding::same(switch_h * 0.5), track_fill);
+
+        let knob_r = 8.0;
+        let knob_x = if *checked {
+            switch_rect.right() - 3.0 - knob_r
+        } else {
+            switch_rect.left() + 3.0 + knob_r
+        };
+        ui.painter().circle_filled(
+            Pos2::new(knob_x, switch_rect.center().y),
+            knob_r,
+            Color32::WHITE,
+        );
 
         paint_focus_ring(ui, &response, palette, ThemeTokens::RADIUS_CONTROL);
     }

@@ -151,12 +151,20 @@ struct BridgeReporter {
     notifier: Arc<Mutex<Notifier>>,
     wake_ui: Option<Arc<dyn Fn() + Send + Sync>>,
     window_visible: Arc<AtomicBool>,
+    cancelled: Arc<AtomicBool>,
     sticky_sigs: Mutex<HashSet<String>>,
     sticky_names: Mutex<HashSet<String>>,
 }
 
 impl BridgeReporter {
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
     fn wake(&self) {
+        if self.is_cancelled() {
+            return;
+        }
         if let Some(cb) = &self.wake_ui {
             cb();
         }
@@ -200,6 +208,9 @@ impl BridgeReporter {
 
 impl Reporter for BridgeReporter {
     fn emit(&self, event: Event) {
+        if self.is_cancelled() {
+            return;
+        }
         match event {
             Event::Engine { interval, .. } => {
                 if let Ok(mut snap) = self.snapshot.lock() {
@@ -406,6 +417,7 @@ pub struct EngineController {
     window_visible: Arc<AtomicBool>,
     cmd_tx: Option<mpsc::Sender<EngineCommand>>,
     worker: Option<JoinHandle<()>>,
+    run_cancelled: Option<Arc<AtomicBool>>,
 }
 
 impl Default for EngineController {
@@ -422,11 +434,15 @@ impl EngineController {
             window_visible: Arc::new(AtomicBool::new(true)),
             cmd_tx: None,
             worker: None,
+            run_cancelled: None,
         }
     }
 
     pub fn snapshot(&self) -> GuiSnapshot {
-        self.snapshot.lock().map(|g| g.clone()).unwrap_or_default()
+        self.snapshot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn is_running(&self) -> bool {
@@ -447,9 +463,8 @@ impl EngineController {
 
     /// Update the notifier used by the worker thread for attendance and auth alerts.
     pub fn set_notifier(&mut self, notifier: Notifier) {
-        if let Ok(mut guard) = self.notifier.lock() {
-            *guard = notifier;
-        }
+        let mut guard = self.notifier.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = notifier;
     }
 
     /// Start the background attendance engine on a dedicated worker thread.
@@ -466,10 +481,12 @@ impl EngineController {
             let _ = old_handle.join();
         }
         self.cmd_tx = None;
+        self.run_cancelled = None;
 
         let client = AbsenClient::new(&cfg.base_url).map_err(|e| sanitize_text(&e.to_string()))?;
 
-        if let Ok(mut snap) = self.snapshot.lock() {
+        {
+            let mut snap = self.snapshot.lock().unwrap_or_else(|e| e.into_inner());
             snap.status = EngineStatus::Connecting;
             snap.auth_status = "Menghubungkan ke portal akademik...".to_string();
             snap.user = None;
@@ -485,6 +502,8 @@ impl EngineController {
         let snapshot = Arc::clone(&self.snapshot);
         let notifier = Arc::clone(&self.notifier);
         let window_visible = Arc::clone(&self.window_visible);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let run_cancelled = Arc::clone(&cancelled);
         let wake_arc: Option<Arc<dyn Fn() + Send + Sync>> = wake_ui.map(Arc::from);
 
         let reporter = BridgeReporter {
@@ -492,6 +511,7 @@ impl EngineController {
             notifier: Arc::clone(&notifier),
             wake_ui: wake_arc.clone(),
             window_visible,
+            cancelled: Arc::clone(&cancelled),
             sticky_sigs: Mutex::new(HashSet::new()),
             sticky_names: Mutex::new(HashSet::new()),
         };
@@ -500,22 +520,25 @@ impl EngineController {
             .name("absen-engine-worker".to_string())
             .spawn(move || {
                 let result = run_with_commands(&cfg, &client, loop_mode, &reporter, &rx);
+                if cancelled.load(Ordering::Acquire) {
+                    return;
+                }
                 match result {
                     Ok(()) => {
-                        if let Ok(mut snap) = snapshot.lock() {
-                            snap.countdown_secs = 0;
-                            if !matches!(
-                                snap.status,
-                                EngineStatus::AuthFailed | EngineStatus::NetworkError
-                            ) {
-                                snap.status = EngineStatus::Stopped;
-                            }
+                        let mut snap = snapshot.lock().unwrap_or_else(|e| e.into_inner());
+                        snap.countdown_secs = 0;
+                        if !matches!(
+                            snap.status,
+                            EngineStatus::AuthFailed | EngineStatus::NetworkError
+                        ) {
+                            snap.status = EngineStatus::Stopped;
                         }
                     }
                     Err(EngineError::LoginFailed) => {
                         let detail =
                             "NIM atau kata sandi ditolak oleh portal akademik.".to_string();
-                        if let Ok(mut snap) = snapshot.lock() {
+                        {
+                            let mut snap = snapshot.lock().unwrap_or_else(|e| e.into_inner());
                             snap.status = EngineStatus::AuthFailed;
                             snap.countdown_secs = 0;
                             snap.last_error = Some(format!("Login gagal: {detail}"));
@@ -526,11 +549,10 @@ impl EngineController {
                     }
                     Err(EngineError::Client(err)) => {
                         let detail = sanitize_text(&err.to_string());
-                        if let Ok(mut snap) = snapshot.lock() {
-                            snap.status = EngineStatus::NetworkError;
-                            snap.countdown_secs = 0;
-                            snap.last_error = Some(format!("Gangguan jaringan: {detail}"));
-                        }
+                        let mut snap = snapshot.lock().unwrap_or_else(|e| e.into_inner());
+                        snap.status = EngineStatus::NetworkError;
+                        snap.countdown_secs = 0;
+                        snap.last_error = Some(format!("Gangguan jaringan: {detail}"));
                     }
                 }
                 if let Some(cb) = &wake_arc {
@@ -541,6 +563,7 @@ impl EngineController {
 
         self.cmd_tx = Some(tx);
         self.worker = Some(handle);
+        self.run_cancelled = Some(run_cancelled);
         Ok(())
     }
 
@@ -550,21 +573,36 @@ impl EngineController {
             .is_some_and(|tx| tx.send(EngineCommand::ScanNow).is_ok())
     }
 
+    /// Signal the worker thread to stop without blocking the UI thread if an HTTP request is in flight.
     pub fn stop(&mut self) {
+        if let Some(flag) = self.run_cancelled.take() {
+            flag.store(true, Ordering::Release);
+        }
         if let Some(tx) = self.cmd_tx.take() {
             let _ = tx.send(EngineCommand::Stop);
         }
         if let Some(handle) = self.worker.take() {
-            let _ = handle.join();
-        }
-        if let Ok(mut snap) = self.snapshot.lock() {
-            snap.countdown_secs = 0;
-            if !matches!(
-                snap.status,
-                EngineStatus::AuthFailed | EngineStatus::NetworkError
-            ) {
-                snap.status = EngineStatus::Stopped;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(120);
+            while !handle.is_finished() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(5));
             }
+            if handle.is_finished() {
+                let _ = handle.join();
+            } else {
+                let _ = std::thread::Builder::new()
+                    .name("absen-engine-reaper".to_string())
+                    .spawn(move || {
+                        let _ = handle.join();
+                    });
+            }
+        }
+        let mut snap = self.snapshot.lock().unwrap_or_else(|e| e.into_inner());
+        snap.countdown_secs = 0;
+        if !matches!(
+            snap.status,
+            EngineStatus::AuthFailed | EngineStatus::NetworkError
+        ) {
+            snap.status = EngineStatus::Stopped;
         }
     }
 
@@ -617,5 +655,44 @@ mod tests {
         assert_eq!(items.len(), 50);
         assert_eq!(items.first().unwrap().message, "Pesan 25");
         assert_eq!(items.last().unwrap().message, "Pesan 74");
+    }
+
+    #[test]
+    fn cancelled_reporter_ignores_late_events_and_stop_is_non_blocking() {
+        let snapshot = Arc::new(Mutex::new(GuiSnapshot::default()));
+        let notifier = Arc::new(Mutex::new(Notifier::new(false)));
+        let window_visible = Arc::new(AtomicBool::new(true));
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let woke = Arc::new(AtomicBool::new(false));
+        let woke_clone = Arc::clone(&woke);
+
+        let reporter = BridgeReporter {
+            snapshot: Arc::clone(&snapshot),
+            notifier,
+            wake_ui: Some(Arc::new(move || {
+                woke_clone.store(true, Ordering::Release);
+            })),
+            window_visible,
+            cancelled,
+            sticky_sigs: Mutex::new(HashSet::new()),
+            sticky_names: Mutex::new(HashSet::new()),
+        };
+
+        reporter.emit(Event::AuthStatus(
+            concat!("GAGAL", " ", "-", "-", " ", "late").to_string(),
+        ));
+        assert_eq!(snapshot.lock().unwrap().status, EngineStatus::Idle);
+        assert!(!woke.load(Ordering::Acquire));
+
+        // Verify EngineController::stop() does not block even if a worker sleeps longer than 120ms.
+        let mut ctrl = EngineController::new();
+        ctrl.worker = Some(std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(600));
+        }));
+        let start = std::time::Instant::now();
+        ctrl.stop();
+        assert!(start.elapsed() < std::time::Duration::from_millis(350));
+        assert!(!ctrl.is_running());
+        assert_eq!(ctrl.snapshot().status, EngineStatus::Stopped);
     }
 }

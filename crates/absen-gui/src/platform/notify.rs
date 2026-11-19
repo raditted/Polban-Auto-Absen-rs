@@ -56,9 +56,15 @@ impl Notifier {
         if !self.enabled {
             return;
         }
-        let mut note = notify_rust::Notification::new();
-        note.appname("Polban Presensi").summary(summary).body(body);
-        let _ = note.show();
+        let summary = summary.to_string();
+        let body = body.to_string();
+        let _ = std::thread::Builder::new()
+            .name("polban-notify".to_string())
+            .spawn(move || {
+                let mut note = notify_rust::Notification::new();
+                note.appname("Polban Presensi").summary(&summary).body(&body);
+                let _ = note.show();
+            });
     }
 }
 

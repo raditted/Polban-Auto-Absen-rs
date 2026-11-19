@@ -1,22 +1,27 @@
 //! Top-level `eframe::App` state, shortcuts, and responsive 3-breakpoint orchestration.
 
+use std::cell::{Ref, RefCell};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 
 use crate::bridge::{EngineController, GuiSnapshot};
 use crate::credentials::{open_default_store, CredentialStore};
 use crate::icon::IconStatus;
+#[cfg(target_os = "windows")]
+use crate::platform::win32;
 use crate::platform::{AutostartManager, Notifier, TrayCommand, TrayManager};
-use crate::prefs::{self, AppPrefs, ThemePreference};
-use crate::theme::{apply_theme, configure_fonts, ThemeTokens};
+use crate::prefs::{self, AppPrefs, DotenvImportResult, PrefsError, ThemePreference};
+use crate::theme::{
+    apply_appearance, configure_fonts, effective_dark_mode, AppearanceConfig, ThemeTokens,
+};
 use crate::ui::header::HeaderAction;
 use crate::ui::jadwal::JadwalAction;
 use crate::ui::settings::{OnboardingAction, SettingsAction, SettingsState};
-use crate::ui::{action_button, activity, header, jadwal, settings, ButtonTone, CompactTab};
+use crate::ui::{activity, header, jadwal, settings, CompactTab};
 
-/// Main desktop application state implementing `eframe::App`.
-pub struct DesktopApp {
+struct AppCore {
     prefs: AppPrefs,
     creds: Box<dyn CredentialStore>,
     controller: EngineController,
@@ -31,145 +36,22 @@ pub struct DesktopApp {
     headless: bool,
     test_snapshot: Option<GuiSnapshot>,
     diag_rx: Option<mpsc::Receiver<Result<PathBuf, String>>>,
+    import_pick_rx: Option<mpsc::Receiver<Option<Result<DotenvImportResult, PrefsError>>>>,
+    diag_pick_rx: Option<mpsc::Receiver<(absen_core::Config, Option<PathBuf>)>>,
     external_show_flag: Option<Arc<AtomicBool>>,
+    native_hwnd: isize,
+    win32_msg_hwnd: isize,
 }
 
-impl DesktopApp {
-    /// Production desktop constructor loading OS preferences, keyring, and tray icon.
-    pub fn new(cc: &eframe::CreationContext<'_>, start_minimized: bool) -> Self {
-        configure_fonts(&cc.egui_ctx);
-
-        let mut prefs = prefs::load().unwrap_or_default();
-        apply_theme(&cc.egui_ctx, prefs.theme);
-
-        let autostart = AutostartManager::new("Polban Presensi");
-        if let Ok(os_autostart) = autostart.is_enabled() {
-            prefs.autostart = os_autostart;
-        }
-
-        let creds = open_default_store();
-        let initial_password = if prefs.nim.trim().is_empty() {
-            String::new()
-        } else {
-            creds
-                .get_password(&prefs.nim)
-                .ok()
-                .flatten()
-                .unwrap_or_default()
-        };
-
-        let settings = SettingsState::from_prefs(&prefs, initial_password);
-        let notifier = Notifier::new(prefs.notifications_enabled);
-        let mut tray = TrayManager::new().ok();
-        if let Some(t) = &mut tray {
-            t.set_egui_waker(cc.egui_ctx.clone());
-        }
-
-        let mut controller = EngineController::new();
-        controller.set_notifier(notifier.clone());
-        if start_minimized && tray.is_some() {
-            controller.set_window_visible(false);
-        }
-
-        let mut app = Self {
-            prefs,
-            creds,
-            controller,
-            tray,
-            notifier,
-            autostart,
-            settings,
-            compact_tab: CompactTab::Jadwal,
-            start_minimized,
-            minimized_applied: false,
-            quit_requested: false,
-            headless: false,
-            test_snapshot: None,
-            diag_rx: None,
-            external_show_flag: None,
-        };
-
-        if !app.prefs.nim.trim().is_empty()
-            && app.prefs.auto_start_monitoring
-            && !app.settings.password.is_empty()
-        {
-            app.handle_start_monitoring(&cc.egui_ctx);
-        }
-
-        app
-    }
-
-    /// Headless constructor for deterministic UI tests without touching OS prefs or tray.
-    pub fn new_headless(
-        ctx: &egui::Context,
-        prefs: AppPrefs,
-        creds: Box<dyn CredentialStore>,
-    ) -> Self {
-        configure_fonts(ctx);
-        apply_theme(ctx, prefs.theme);
-
-        let initial_password = if prefs.nim.trim().is_empty() {
-            String::new()
-        } else {
-            creds
-                .get_password(&prefs.nim)
-                .ok()
-                .flatten()
-                .unwrap_or_default()
-        };
-
-        let settings = SettingsState::from_prefs(&prefs, initial_password);
-        let notifier = Notifier::new(prefs.notifications_enabled);
-        let autostart = AutostartManager::new("Polban Presensi");
-        let mut controller = EngineController::new();
-        controller.set_notifier(notifier.clone());
-
-        Self {
-            prefs,
-            creds,
-            controller,
-            tray: None,
-            notifier,
-            autostart,
-            settings,
-            compact_tab: CompactTab::Jadwal,
-            start_minimized: false,
-            minimized_applied: true,
-            quit_requested: false,
-            headless: true,
-            test_snapshot: None,
-            diag_rx: None,
-            external_show_flag: None,
-        }
-    }
-
-    /// Attach a cross-process wakeup flag used by the single-instance listener.
-    pub fn set_external_show_flag(&mut self, flag: Arc<AtomicBool>) {
-        self.external_show_flag = Some(flag);
-    }
-
+impl AppCore {
     fn reveal_window(&self, ctx: &egui::Context) {
         self.controller.set_window_visible(true);
+        #[cfg(target_os = "windows")]
+        win32::restore_and_focus_window(self.native_hwnd);
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-    }
-
-    /// Inject or clear a deterministic `GuiSnapshot` for headless UI testing.
-    pub fn set_test_snapshot(&mut self, snapshot: Option<GuiSnapshot>) {
-        self.test_snapshot = snapshot;
-    }
-
-    pub fn is_settings_open(&self) -> bool {
-        self.settings.open
-    }
-
-    pub fn prefs(&self) -> &AppPrefs {
-        &self.prefs
-    }
-
-    pub fn compact_tab(&self) -> CompactTab {
-        self.compact_tab
+        ctx.request_repaint();
     }
 
     fn current_snapshot(&self) -> GuiSnapshot {
@@ -178,20 +60,67 @@ impl DesktopApp {
             .unwrap_or_else(|| self.controller.snapshot())
     }
 
+    fn sync_tray_status(&mut self) {
+        let snapshot = self.current_snapshot();
+        if let Some(tray) = &mut self.tray {
+            let icon_status = match snapshot.status {
+                crate::bridge::EngineStatus::Monitoring
+                | crate::bridge::EngineStatus::ScanningNow
+                | crate::bridge::EngineStatus::Connecting => IconStatus::Monitoring,
+                crate::bridge::EngineStatus::AuthFailed
+                | crate::bridge::EngineStatus::NetworkError => IconStatus::Error,
+                _ => IconStatus::Idle,
+            };
+            tray.update_status(icon_status, snapshot.status.is_active());
+        }
+    }
+
     fn persist_prefs(&self) {
         if !self.headless {
             let _ = prefs::save(&self.prefs);
         }
     }
 
-    fn cycle_theme(&mut self, ctx: &egui::Context) {
-        self.prefs.theme = match self.prefs.theme {
-            ThemePreference::System => ThemePreference::Light,
-            ThemePreference::Light => ThemePreference::Dark,
-            ThemePreference::Dark => ThemePreference::System,
+    fn prefs_appearance(&self) -> AppearanceConfig {
+        AppearanceConfig {
+            mode: self.prefs.theme,
+            light_preset: self.prefs.light_preset,
+            dark_preset: self.prefs.dark_preset,
+        }
+    }
+
+    fn active_appearance(&self) -> AppearanceConfig {
+        if self.settings.open {
+            self.settings.appearance()
+        } else {
+            self.prefs_appearance()
+        }
+    }
+
+    fn open_settings(&mut self) {
+        self.settings.theme = self.prefs.theme;
+        self.settings.light_preset = self.prefs.light_preset;
+        self.settings.dark_preset = self.prefs.dark_preset;
+        self.settings.open = true;
+    }
+
+    fn close_settings(&mut self, ctx: &egui::Context) {
+        self.settings.open = false;
+        self.settings.theme = self.prefs.theme;
+        self.settings.light_preset = self.prefs.light_preset;
+        self.settings.dark_preset = self.prefs.dark_preset;
+        apply_appearance(ctx, self.prefs_appearance());
+    }
+
+    fn toggle_theme(&mut self, ctx: &egui::Context) {
+        let is_dark = effective_dark_mode(ctx, self.prefs.theme);
+        self.prefs.theme = if is_dark {
+            ThemePreference::Light
+        } else {
+            ThemePreference::Dark
         };
         self.settings.theme = self.prefs.theme;
-        apply_theme(ctx, self.prefs.theme);
+        apply_appearance(ctx, self.prefs_appearance());
         self.persist_prefs();
     }
 
@@ -222,13 +151,72 @@ impl DesktopApp {
         }
         let cfg = self.prefs.to_core_config(pw);
         let wake_ctx = ctx.clone();
+        #[cfg(target_os = "windows")]
+        let wake_msg_hwnd = self.win32_msg_hwnd;
         if let Err(err) = self.controller.start(
             cfg,
             true,
-            Some(Box::new(move || wake_ctx.request_repaint())),
+            Some(Box::new(move || {
+                #[cfg(target_os = "windows")]
+                if wake_msg_hwnd != 0 {
+                    win32::post_app_message(wake_msg_hwnd, win32::WM_APP_SYNC_TRAY);
+                }
+                wake_ctx.request_repaint();
+            })),
         ) {
             self.settings.status_message = Some(format!("Gagal memulai pemantauan: {err}"));
             self.settings.status_is_error = true;
+        }
+    }
+
+    fn perform_quit(&mut self, ctx: &egui::Context) {
+        self.quit_requested = true;
+        self.controller.stop();
+        self.persist_prefs();
+        self.tray.take();
+
+        #[cfg(target_os = "windows")]
+        {
+            if self.native_hwnd != 0 && !win32::is_window_visible(self.native_hwnd) {
+                win32::destroy_window(self.native_hwnd);
+                return;
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            ctx.request_repaint();
+            win32::post_close_window(self.native_hwnd);
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            ctx.request_repaint();
+        }
+    }
+
+    fn execute_tray_command(&mut self, cmd: TrayCommand, ctx: &egui::Context) {
+        match cmd {
+            TrayCommand::ShowWindow => {
+                self.reveal_window(ctx);
+            }
+            TrayCommand::ToggleMonitoring => {
+                if self.controller.is_running() {
+                    self.controller.stop();
+                } else {
+                    self.handle_start_monitoring(ctx);
+                    if !self.controller.is_running() {
+                        self.reveal_window(ctx);
+                    }
+                }
+                self.sync_tray_status();
+                ctx.request_repaint();
+            }
+            TrayCommand::ScanNow => {
+                let _ = self.controller.scan_now();
+                ctx.request_repaint();
+            }
+            TrayCommand::Quit => {
+                self.perform_quit(ctx);
+            }
         }
     }
 
@@ -238,25 +226,9 @@ impl DesktopApp {
             None => Vec::new(),
         };
         for cmd in commands {
-            match cmd {
-                TrayCommand::ShowWindow => {
-                    self.reveal_window(ctx);
-                }
-                TrayCommand::ToggleMonitoring => {
-                    if self.controller.is_running() {
-                        self.controller.stop();
-                    } else {
-                        self.handle_start_monitoring(ctx);
-                    }
-                }
-                TrayCommand::ScanNow => {
-                    let _ = self.controller.scan_now();
-                }
-                TrayCommand::Quit => {
-                    self.quit_requested = true;
-                    self.controller.stop();
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
+            self.execute_tray_command(cmd, ctx);
+            if self.quit_requested {
+                break;
             }
         }
     }
@@ -265,11 +237,11 @@ impl DesktopApp {
         if self.settings.open
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
         {
-            self.settings.open = false;
+            self.close_settings(ctx);
         }
 
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma)) {
-            self.settings.open = true;
+            self.open_settings();
         }
 
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::R)) {
@@ -287,13 +259,11 @@ impl DesktopApp {
         }
 
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Q)) {
-            self.quit_requested = true;
-            self.controller.stop();
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            self.perform_quit(ctx);
         }
     }
 
-    fn apply_dotenv_result(&mut self, res: prefs::DotenvImportResult) {
+    fn apply_dotenv_result(&mut self, res: DotenvImportResult) {
         let pw = res.password.unwrap_or_default();
         let nim = res.prefs.nim.trim().to_string();
 
@@ -340,22 +310,7 @@ impl DesktopApp {
         self.settings = next;
     }
 
-    fn handle_import_dotenv(&mut self) {
-        let import_result = if self.headless {
-            prefs::detect_env_candidates()
-                .into_iter()
-                .next()
-                .map(|path| prefs::import_dotenv_file(&path))
-        } else {
-            match prefs::pick_dotenv_and_import() {
-                Some(res) => Some(res),
-                None => prefs::detect_env_candidates()
-                    .into_iter()
-                    .next()
-                    .map(|path| prefs::import_dotenv_file(&path)),
-            }
-        };
-
+    fn finish_dotenv_import(&mut self, import_result: Option<Result<DotenvImportResult, PrefsError>>) {
         let Some(result) = import_result else {
             self.settings.status_message = Some(
                 "Tidak ada file .env yang dipilih atau ditemukan di direktori standar.".to_string(),
@@ -373,8 +328,85 @@ impl DesktopApp {
         }
     }
 
+    fn handle_import_dotenv(&mut self, ctx: &egui::Context) {
+        if self.headless {
+            let import_result = prefs::detect_env_candidates()
+                .into_iter()
+                .next()
+                .map(|path| prefs::import_dotenv_file(&path));
+            self.finish_dotenv_import(import_result);
+            return;
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            if self.import_pick_rx.is_some() {
+                return;
+            }
+            let (tx, rx) = mpsc::channel();
+            let wake_ctx = ctx.clone();
+            if std::thread::Builder::new()
+                .name("polban-dotenv-picker".to_string())
+                .spawn(move || {
+                    let picked = match prefs::pick_dotenv_and_import() {
+                        Some(res) => Some(res),
+                        None => prefs::detect_env_candidates()
+                            .into_iter()
+                            .next()
+                            .map(|path| prefs::import_dotenv_file(&path)),
+                    };
+                    let _ = tx.send(picked);
+                    wake_ctx.request_repaint();
+                })
+                .is_ok()
+            {
+                self.import_pick_rx = Some(rx);
+                return;
+            }
+        }
+
+        let _ = ctx;
+        let import_result = match prefs::pick_dotenv_and_import() {
+            Some(res) => Some(res),
+            None => prefs::detect_env_candidates()
+                .into_iter()
+                .next()
+                .map(|path| prefs::import_dotenv_file(&path)),
+        };
+        self.finish_dotenv_import(import_result);
+    }
+
+    fn spawn_diagnostic_export(
+        &mut self,
+        ctx: &egui::Context,
+        cfg: absen_core::Config,
+        out_path: PathBuf,
+    ) {
+        let (tx, rx) = mpsc::channel();
+        let wake_ctx = ctx.clone();
+        match std::thread::Builder::new()
+            .name("absen-diag-export".to_string())
+            .spawn(move || {
+                let res = EngineController::dump_diagnostic_html(&cfg, &out_path);
+                let _ = tx.send(res);
+                wake_ctx.request_repaint();
+            }) {
+            Ok(_) => {
+                self.diag_rx = Some(rx);
+                self.settings.status_message =
+                    Some("Mengambil HTML halaman absen untuk diagnostik...".to_string());
+                self.settings.status_is_error = false;
+            }
+            Err(err) => {
+                self.settings.status_message =
+                    Some(format!("Gagal memulai ekspor HTML diagnostik: {err}"));
+                self.settings.status_is_error = true;
+            }
+        }
+    }
+
     fn handle_export_diagnostic_html(&mut self, ctx: &egui::Context) {
-        if self.diag_rx.is_some() {
+        if self.diag_rx.is_some() || self.diag_pick_rx.is_some() {
             self.settings.status_message =
                 Some("Ekspor HTML diagnostik sedang berjalan, harap tunggu...".to_string());
             self.settings.status_is_error = false;
@@ -405,38 +437,64 @@ impl DesktopApp {
             self.settings.status_is_error = false;
             return;
         }
-        let Some(out_path) = prefs::pick_diagnostic_html_save_path() else {
-            return;
-        };
 
         let mut temp_prefs = self.prefs.clone();
         self.settings.apply_to_prefs(&mut temp_prefs);
         let cfg = temp_prefs.to_core_config(pw);
 
-        let (tx, rx) = mpsc::channel();
-        let wake_ctx = ctx.clone();
-        match std::thread::Builder::new()
-            .name("absen-diag-export".to_string())
-            .spawn(move || {
-                let res = EngineController::dump_diagnostic_html(&cfg, &out_path);
-                let _ = tx.send(res);
-                wake_ctx.request_repaint();
-            }) {
-            Ok(_) => {
-                self.diag_rx = Some(rx);
-                self.settings.status_message =
-                    Some("Mengambil HTML halaman absen untuk diagnostik...".to_string());
-                self.settings.status_is_error = false;
+        #[cfg(target_os = "windows")]
+        {
+            let (tx, rx) = mpsc::channel();
+            let wake_ctx = ctx.clone();
+            match std::thread::Builder::new()
+                .name("polban-diag-picker".to_string())
+                .spawn(move || {
+                    let path = prefs::pick_diagnostic_html_save_path();
+                    let _ = tx.send((cfg, path));
+                    wake_ctx.request_repaint();
+                }) {
+                Ok(_) => self.diag_pick_rx = Some(rx),
+                Err(err) => {
+                    self.settings.status_message =
+                        Some(format!("Gagal membuka dialog penyimpanan: {err}"));
+                    self.settings.status_is_error = true;
+                }
             }
-            Err(err) => {
-                self.settings.status_message =
-                    Some(format!("Gagal memulai ekspor HTML diagnostik: {err}"));
-                self.settings.status_is_error = true;
-            }
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        if let Some(out_path) = prefs::pick_diagnostic_html_save_path() {
+            self.spawn_diagnostic_export(ctx, cfg, out_path);
         }
     }
 
-    fn poll_diagnostic_export(&mut self) {
+    fn poll_background_tasks(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = &self.import_pick_rx {
+            match rx.try_recv() {
+                Ok(picked) => {
+                    self.import_pick_rx = None;
+                    self.finish_dotenv_import(picked);
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.import_pick_rx = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+
+        if let Some(rx) = &self.diag_pick_rx {
+            match rx.try_recv() {
+                Ok((cfg, Some(out_path))) => {
+                    self.diag_pick_rx = None;
+                    self.spawn_diagnostic_export(ctx, cfg, out_path);
+                }
+                Ok((_, None)) | Err(mpsc::TryRecvError::Disconnected) => {
+                    self.diag_pick_rx = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+
         let result = match &self.diag_rx {
             Some(rx) => match rx.try_recv() {
                 Ok(res) => Some(res),
@@ -511,7 +569,7 @@ impl DesktopApp {
         }
         self.notifier.set_enabled(self.prefs.notifications_enabled);
         self.controller.set_notifier(self.notifier.clone());
-        apply_theme(ctx, self.prefs.theme);
+        apply_appearance(ctx, self.prefs_appearance());
         if let Some(err) = autostart_err {
             self.settings.status_message = Some(format!(
                 "Pengaturan tersimpan, namun gagal mengatur autostart: {err}"
@@ -527,8 +585,7 @@ impl DesktopApp {
         true
     }
 
-    /// Execute one UI frame against `ctx` (shared by `eframe::App::update` and headless tests).
-    pub fn update_ui(&mut self, ctx: &egui::Context) {
+    fn update_ui(&mut self, ctx: &egui::Context) {
         if self.start_minimized && !self.minimized_applied {
             self.minimized_applied = true;
             if self.tray.is_some() {
@@ -546,7 +603,10 @@ impl DesktopApp {
         }
 
         self.handle_tray_commands(ctx);
-        self.poll_diagnostic_export();
+        if self.quit_requested {
+            return;
+        }
+        self.poll_background_tasks(ctx);
 
         if ctx.input(|i| i.viewport().close_requested())
             && !self.quit_requested
@@ -558,21 +618,15 @@ impl DesktopApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
 
-        let palette = apply_theme(ctx, self.prefs.theme);
+        let palette = apply_appearance(ctx, self.active_appearance());
+        let is_dark = palette.dark_mode;
         let snapshot = self.current_snapshot();
         self.handle_shortcuts(ctx, snapshot.status.is_active());
-
-        if let Some(tray) = &mut self.tray {
-            let icon_status = match snapshot.status {
-                crate::bridge::EngineStatus::Monitoring
-                | crate::bridge::EngineStatus::ScanningNow
-                | crate::bridge::EngineStatus::Connecting => IconStatus::Monitoring,
-                crate::bridge::EngineStatus::AuthFailed
-                | crate::bridge::EngineStatus::NetworkError => IconStatus::Error,
-                _ => IconStatus::Idle,
-            };
-            tray.update_status(icon_status, snapshot.status.is_active());
+        if self.quit_requested {
+            return;
         }
+
+        self.sync_tray_status();
 
         let screen_w = ctx.screen_rect().width();
         let outer_margin = if screen_w < ThemeTokens::BREAKPOINT_MEDIUM {
@@ -588,171 +642,390 @@ impl DesktopApp {
                     .inner_margin(egui::Margin::same(outer_margin)),
             )
             .show(ctx, |ui| {
-                let width = ui.available_width();
-                if let Some(action) = header::show(
-                    ui,
-                    &snapshot,
-                    &self.prefs.nim,
-                    self.prefs.interval,
-                    self.prefs.theme,
-                    palette,
-                    width,
-                ) {
-                    match action {
-                        HeaderAction::StartMonitoring => self.handle_start_monitoring(ctx),
-                        HeaderAction::StopMonitoring => self.controller.stop(),
-                        HeaderAction::ScanNow => {
-                            let _ = self.controller.scan_now();
-                        }
-                        HeaderAction::OpenSettings => {
-                            self.settings.open = true;
-                        }
-                        HeaderAction::CycleTheme => self.cycle_theme(ctx),
-                    }
-                }
+                let avail_rect = ui.available_rect_before_wrap();
+                let avail_w = avail_rect.width();
+                let container_w = avail_w.min(ThemeTokens::MAX_CONTAINER_WIDTH);
+                let side_pad = ((avail_w - container_w) * 0.5).max(0.0);
+                let container_rect = egui::Rect::from_min_size(
+                    egui::pos2(avail_rect.left() + side_pad, avail_rect.top()),
+                    egui::vec2(container_w, avail_rect.height().max(120.0)),
+                );
+                ui.allocate_rect(avail_rect, egui::Sense::hover());
 
-                ui.add_space(ThemeTokens::SPACE_LG);
+                ui.allocate_new_ui(
+                    egui::UiBuilder::new().max_rect(container_rect),
+                    |ui| {
+                        ui.set_width(container_w);
+                        let width = container_w;
+                        if let Some(action) = header::show(
+                            ui,
+                            &snapshot,
+                            &self.prefs.nim,
+                            self.prefs.interval,
+                            is_dark,
+                            palette,
+                            width,
+                        ) {
+                            match action {
+                                HeaderAction::StartMonitoring => self.handle_start_monitoring(ctx),
+                                HeaderAction::StopMonitoring => self.controller.stop(),
+                                HeaderAction::ScanNow => {
+                                    let _ = self.controller.scan_now();
+                                }
+                                HeaderAction::OpenSettings => self.open_settings(),
+                                HeaderAction::CycleTheme => self.toggle_theme(ctx),
+                            }
+                        }
 
-                if self.prefs.nim.trim().is_empty() {
-                    let compact = width < ThemeTokens::BREAKPOINT_MEDIUM;
-                    let backend = self.creds.backend();
-                    egui::ScrollArea::vertical()
-                        .id_salt("onboarding_scroll")
-                        .show(ui, |ui| {
-                            if let Some(onb_action) = settings::show_onboarding(
-                                ui,
-                                &mut self.settings,
-                                backend,
-                                palette,
-                                compact,
-                            ) {
-                                match onb_action {
-                                    OnboardingAction::SaveAndStart => {
-                                        self.save_onboarding_and_start(ctx);
+                        ui.add_space(ThemeTokens::SPACE_LG);
+
+                        if self.prefs.nim.trim().is_empty() {
+                            let compact = width < ThemeTokens::BREAKPOINT_MEDIUM;
+                            let backend = self.creds.backend();
+                            egui::ScrollArea::vertical()
+                                .id_salt("onboarding_scroll")
+                                .show(ui, |ui| {
+                                    if let Some(onb_action) = settings::show_onboarding(
+                                        ui,
+                                        &mut self.settings,
+                                        backend,
+                                        palette,
+                                        compact,
+                                    ) {
+                                        match onb_action {
+                                            OnboardingAction::SaveAndStart => {
+                                                self.save_onboarding_and_start(ctx);
+                                            }
+                                            OnboardingAction::ImportDotenv => {
+                                                self.handle_import_dotenv(ctx);
+                                            }
+                                        }
                                     }
-                                    OnboardingAction::ImportDotenv => {
-                                        self.handle_import_dotenv();
-                                    }
+                                });
+                            return;
+                        }
+
+                        let mut jadwal_action = None;
+                        if width >= ThemeTokens::BREAKPOINT_WIDE {
+                            let gutter = ThemeTokens::SPACE_LG;
+                            let left_w = (width - gutter) * 0.60;
+                            let right_w = (width - gutter - left_w).max(240.0);
+                            let total_rect = ui.available_rect_before_wrap();
+                            let body_h = total_rect.height().max(220.0);
+                            let left_rect = egui::Rect::from_min_size(
+                                total_rect.min,
+                                egui::vec2(left_w, body_h),
+                            );
+                            let right_rect = egui::Rect::from_min_size(
+                                egui::pos2(total_rect.left() + left_w + gutter, total_rect.top()),
+                                egui::vec2(right_w, body_h),
+                            );
+                            ui.allocate_rect(total_rect, egui::Sense::hover());
+                            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(left_rect), |ui| {
+                                jadwal_action = jadwal::show(ui, &snapshot, palette, false, true);
+                            });
+                            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(right_rect), |ui| {
+                                activity::show(ui, &snapshot, palette, false, true);
+                            });
+                        } else {
+                            let compact = width < ThemeTokens::BREAKPOINT_MEDIUM;
+                            egui::ScrollArea::vertical()
+                                .id_salt("stacked_main_scroll")
+                                .show(ui, |ui| {
+                                    jadwal_action =
+                                        jadwal::show(ui, &snapshot, palette, compact, false);
+                                    ui.add_space(ThemeTokens::SPACE_LG);
+                                    activity::show(ui, &snapshot, palette, compact, false);
+                                });
+                        }
+
+                        if let Some(act) = jadwal_action {
+                            match act {
+                                JadwalAction::OpenSettings => self.open_settings(),
+                                JadwalAction::RetryConnection | JadwalAction::StartMonitoring => {
+                                    self.handle_start_monitoring(ctx);
+                                }
+                                JadwalAction::ScanNow => {
+                                    let _ = self.controller.scan_now();
                                 }
                             }
-                        });
-                    return;
-                }
-
-                let mut jadwal_action = None;
-                if width >= ThemeTokens::BREAKPOINT_WIDE {
-                    let gutter = ThemeTokens::SPACE_LG;
-                    let left_w = (width - gutter) * 0.62;
-                    let right_w = (width - gutter - left_w).max(200.0);
-                    let total_rect = ui.available_rect_before_wrap();
-                    let body_h = total_rect.height().max(200.0);
-                    let left_rect =
-                        egui::Rect::from_min_size(total_rect.min, egui::vec2(left_w, body_h));
-                    let right_rect = egui::Rect::from_min_size(
-                        egui::pos2(total_rect.left() + left_w + gutter, total_rect.top()),
-                        egui::vec2(right_w, body_h),
-                    );
-                    ui.allocate_rect(total_rect, egui::Sense::hover());
-                    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(left_rect), |ui| {
-                        jadwal_action = jadwal::show(ui, &snapshot, palette, false, true);
-                    });
-                    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(right_rect), |ui| {
-                        activity::show(ui, &snapshot, palette, false, true);
-                    });
-                } else if width >= ThemeTokens::BREAKPOINT_MEDIUM {
-                    egui::ScrollArea::vertical()
-                        .id_salt("medium_main_scroll")
-                        .show(ui, |ui| {
-                            jadwal_action = jadwal::show(ui, &snapshot, palette, false, false);
-                            ui.add_space(ThemeTokens::SPACE_LG);
-                            activity::show(ui, &snapshot, palette, false, false);
-                        });
-                } else {
-                    let tab_w = ((width - ThemeTokens::SPACE_SM) * 0.5).max(110.0);
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = ThemeTokens::SPACE_SM;
-                        if action_button(
-                            ui,
-                            palette,
-                            if self.compact_tab == CompactTab::Jadwal {
-                                ButtonTone::Primary
-                            } else {
-                                ButtonTone::Secondary
-                            },
-                            "Jadwal",
-                            None,
-                            true,
-                            tab_w,
-                        )
-                        .clicked()
-                        {
-                            self.compact_tab = CompactTab::Jadwal;
                         }
-                        if action_button(
-                            ui,
-                            palette,
-                            if self.compact_tab == CompactTab::Activity {
-                                ButtonTone::Primary
-                            } else {
-                                ButtonTone::Secondary
-                            },
-                            "Aktivitas",
-                            None,
-                            true,
-                            tab_w,
-                        )
-                        .clicked()
-                        {
-                            self.compact_tab = CompactTab::Activity;
-                        }
-                    });
-                    ui.add_space(ThemeTokens::SPACE_MD);
-                    egui::ScrollArea::vertical()
-                        .id_salt("compact_main_scroll")
-                        .show(ui, |ui| match self.compact_tab {
-                            CompactTab::Jadwal => {
-                                jadwal_action = jadwal::show(ui, &snapshot, palette, true, false);
-                            }
-                            CompactTab::Activity => {
-                                activity::show(ui, &snapshot, palette, true, false);
-                            }
-                        });
-                }
-
-                if let Some(act) = jadwal_action {
-                    match act {
-                        JadwalAction::OpenSettings => self.settings.open = true,
-                        JadwalAction::RetryConnection | JadwalAction::StartMonitoring => {
-                            self.handle_start_monitoring(ctx);
-                        }
-                        JadwalAction::ScanNow => {
-                            let _ = self.controller.scan_now();
-                        }
-                    }
-                }
+                    },
+                );
             });
 
         let backend = self.creds.backend();
         if let Some(action) = settings::show(ctx, &mut self.settings, backend, palette) {
             match action {
-                SettingsAction::Close => self.settings.open = false,
+                SettingsAction::Close => self.close_settings(ctx),
                 SettingsAction::Save => {
                     self.save_settings_inner(ctx, true);
                 }
                 SettingsAction::ImportDotenv => {
-                    self.handle_import_dotenv();
+                    self.handle_import_dotenv(ctx);
                 }
                 SettingsAction::ExportDiagnosticHtml => {
                     self.handle_export_diagnostic_html(ctx);
+                }
+                SettingsAction::PreviewTheme(appearance) => {
+                    apply_appearance(ctx, appearance);
                 }
             }
         }
     }
 }
 
+/// Main desktop application state implementing `eframe::App`.
+pub struct DesktopApp {
+    core: Rc<RefCell<AppCore>>,
+    #[cfg(target_os = "windows")]
+    msg_window: Option<win32::MessageWindow>,
+}
+
+impl DesktopApp {
+    /// Production desktop constructor loading OS preferences, keyring, and tray icon.
+    pub fn new(cc: &eframe::CreationContext<'_>, start_minimized: bool) -> Self {
+        configure_fonts(&cc.egui_ctx);
+
+        let mut prefs = prefs::load().unwrap_or_default();
+        apply_appearance(
+            &cc.egui_ctx,
+            AppearanceConfig {
+                mode: prefs.theme,
+                light_preset: prefs.light_preset,
+                dark_preset: prefs.dark_preset,
+            },
+        );
+
+        let autostart = AutostartManager::new("Polban Presensi");
+        if let Ok(os_autostart) = autostart.is_enabled() {
+            prefs.autostart = os_autostart;
+        }
+
+        let creds = open_default_store();
+        let initial_password = if prefs.nim.trim().is_empty() {
+            String::new()
+        } else {
+            creds
+                .get_password(&prefs.nim)
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+        };
+
+        let settings = SettingsState::from_prefs(&prefs, initial_password);
+        let notifier = Notifier::new(prefs.notifications_enabled);
+        let tray = TrayManager::new().ok();
+
+        let mut controller = EngineController::new();
+        controller.set_notifier(notifier.clone());
+        if start_minimized && tray.is_some() {
+            controller.set_window_visible(false);
+        }
+
+        #[cfg(target_os = "windows")]
+        let native_hwnd = win32::extract_hwnd(cc).unwrap_or(0);
+        #[cfg(not(target_os = "windows"))]
+        let native_hwnd = 0;
+
+        let core = Rc::new(RefCell::new(AppCore {
+            prefs,
+            creds,
+            controller,
+            tray,
+            notifier,
+            autostart,
+            settings,
+            compact_tab: CompactTab::Jadwal,
+            start_minimized,
+            minimized_applied: false,
+            quit_requested: false,
+            headless: false,
+            test_snapshot: None,
+            diag_rx: None,
+            import_pick_rx: None,
+            diag_pick_rx: None,
+            external_show_flag: None,
+            native_hwnd,
+            win32_msg_hwnd: 0,
+        }));
+
+        #[cfg(target_os = "windows")]
+        let msg_window = {
+            let msg_weak = Rc::downgrade(&core);
+            let msg_ctx = cc.egui_ctx.clone();
+            win32::MessageWindow::new(move |msg| {
+                if let Some(rc) = msg_weak.upgrade() {
+                    if let Ok(mut c) = rc.try_borrow_mut() {
+                        match msg {
+                            win32::WM_APP_SHOW_WINDOW => c.reveal_window(&msg_ctx),
+                            win32::WM_APP_TRAY_CMD => {
+                                c.handle_tray_commands(&msg_ctx);
+                                if !c.quit_requested {
+                                    c.sync_tray_status();
+                                }
+                            }
+                            win32::WM_APP_SYNC_TRAY => {
+                                c.sync_tray_status();
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            })
+            .ok()
+        };
+
+        #[cfg(target_os = "windows")]
+        let win32_msg_hwnd = msg_window.as_ref().map_or(0, |w| w.hwnd());
+        #[cfg(not(target_os = "windows"))]
+        let win32_msg_hwnd = 0;
+
+        {
+            let mut c = core.borrow_mut();
+            c.win32_msg_hwnd = win32_msg_hwnd;
+
+            let waker_ctx = cc.egui_ctx.clone();
+            if let Some(t) = &mut c.tray {
+                t.set_waker(Arc::new(move |cmd| {
+                    #[cfg(target_os = "windows")]
+                    if win32_msg_hwnd != 0 {
+                        win32::post_app_message(win32_msg_hwnd, win32::WM_APP_TRAY_CMD);
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    if matches!(cmd, TrayCommand::ShowWindow) {
+                        waker_ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                        waker_ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                        waker_ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    }
+                    let _ = cmd;
+                    waker_ctx.request_repaint();
+                }));
+            }
+
+            if !c.prefs.nim.trim().is_empty()
+                && c.prefs.auto_start_monitoring
+                && !c.settings.password.is_empty()
+            {
+                c.handle_start_monitoring(&cc.egui_ctx);
+            }
+        }
+
+        Self {
+            core,
+            #[cfg(target_os = "windows")]
+            msg_window,
+        }
+    }
+
+    /// Headless constructor for deterministic UI tests without touching OS prefs or tray.
+    pub fn new_headless(
+        ctx: &egui::Context,
+        prefs: AppPrefs,
+        creds: Box<dyn CredentialStore>,
+    ) -> Self {
+        configure_fonts(ctx);
+        apply_appearance(
+            ctx,
+            AppearanceConfig {
+                mode: prefs.theme,
+                light_preset: prefs.light_preset,
+                dark_preset: prefs.dark_preset,
+            },
+        );
+
+        let initial_password = if prefs.nim.trim().is_empty() {
+            String::new()
+        } else {
+            creds
+                .get_password(&prefs.nim)
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+        };
+
+        let settings = SettingsState::from_prefs(&prefs, initial_password);
+        let notifier = Notifier::new(prefs.notifications_enabled);
+        let autostart = AutostartManager::new("Polban Presensi");
+        let mut controller = EngineController::new();
+        controller.set_notifier(notifier.clone());
+
+        let core = Rc::new(RefCell::new(AppCore {
+            prefs,
+            creds,
+            controller,
+            tray: None,
+            notifier,
+            autostart,
+            settings,
+            compact_tab: CompactTab::Jadwal,
+            start_minimized: false,
+            minimized_applied: true,
+            quit_requested: false,
+            headless: true,
+            test_snapshot: None,
+            diag_rx: None,
+            import_pick_rx: None,
+            diag_pick_rx: None,
+            external_show_flag: None,
+            native_hwnd: 0,
+            win32_msg_hwnd: 0,
+        }));
+
+        Self {
+            core,
+            #[cfg(target_os = "windows")]
+            msg_window: None,
+        }
+    }
+
+    /// Returns the hidden Win32 message window HWND used for out-of-band UI wakeups.
+    #[cfg(target_os = "windows")]
+    pub fn win32_msg_hwnd(&self) -> Option<isize> {
+        self.msg_window.as_ref().map(|w| w.hwnd())
+    }
+
+    /// Attach a cross-process wakeup flag used by the single-instance listener.
+    pub fn set_external_show_flag(&mut self, flag: Arc<AtomicBool>) {
+        self.core.borrow_mut().external_show_flag = Some(flag);
+    }
+
+    /// Inject or clear a deterministic `GuiSnapshot` for headless UI testing.
+    pub fn set_test_snapshot(&mut self, snapshot: Option<GuiSnapshot>) {
+        self.core.borrow_mut().test_snapshot = snapshot;
+    }
+
+    pub fn is_settings_open(&self) -> bool {
+        self.core.borrow().settings.open
+    }
+
+    pub fn prefs(&self) -> Ref<'_, AppPrefs> {
+        Ref::map(self.core.borrow(), |c| &c.prefs)
+    }
+
+    pub fn compact_tab(&self) -> CompactTab {
+        self.core.borrow().compact_tab
+    }
+
+    /// Execute one UI frame against `ctx` (shared by `eframe::App::update` and headless tests).
+    pub fn update_ui(&mut self, ctx: &egui::Context) {
+        self.core.borrow_mut().update_ui(ctx);
+    }
+}
+
 impl eframe::App for DesktopApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.update_ui(ctx);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Ok(mut c) = self.core.try_borrow_mut() {
+            c.controller.stop();
+            c.persist_prefs();
+            c.tray.take();
+        }
+        #[cfg(target_os = "windows")]
+        self.msg_window.take();
     }
 }
 
@@ -765,7 +1038,7 @@ mod tests {
     fn apply_dotenv_result_persists_password_to_credential_store() {
         let ctx = egui::Context::default();
         let creds = MemoryFallbackStore::new();
-        let mut app = DesktopApp::new_headless(&ctx, AppPrefs::default(), Box::new(creds));
+        let app = DesktopApp::new_headless(&ctx, AppPrefs::default(), Box::new(creds));
 
         let res = prefs::DotenvImportResult {
             prefs: AppPrefs {
@@ -777,13 +1050,14 @@ mod tests {
             source_path: PathBuf::from(".env"),
         };
 
-        app.apply_dotenv_result(res);
-        assert_eq!(app.settings.nim, "251511099");
-        assert_eq!(app.settings.password, "rahasia#123");
-        assert_eq!(app.settings.interval, 45);
-        assert!(!app.settings.status_is_error);
+        let mut core = app.core.borrow_mut();
+        core.apply_dotenv_result(res);
+        assert_eq!(core.settings.nim, "251511099");
+        assert_eq!(core.settings.password, "rahasia#123");
+        assert_eq!(core.settings.interval, 45);
+        assert!(!core.settings.status_is_error);
         assert_eq!(
-            app.creds.get_password("251511099").unwrap().as_deref(),
+            core.creds.get_password("251511099").unwrap().as_deref(),
             Some("rahasia#123")
         );
     }
@@ -796,10 +1070,86 @@ mod tests {
             AppPrefs::default(),
             Box::new(MemoryFallbackStore::new()),
         );
-        app.controller.set_window_visible(false);
-        assert!(!app.controller.is_window_visible());
+        let core = app.core.borrow();
+        core.controller.set_window_visible(false);
+        assert!(!core.controller.is_window_visible());
 
-        app.reveal_window(&ctx);
-        assert!(app.controller.is_window_visible());
+        core.reveal_window(&ctx);
+        assert!(core.controller.is_window_visible());
+    }
+
+    #[test]
+    fn execute_tray_commands_handle_show_toggle_scan_and_quit() {
+        let ctx = egui::Context::default();
+        let app = DesktopApp::new_headless(
+            &ctx,
+            AppPrefs::default(),
+            Box::new(MemoryFallbackStore::new()),
+        );
+        let mut core = app.core.borrow_mut();
+
+        core.controller.set_window_visible(false);
+        core.execute_tray_command(TrayCommand::ShowWindow, &ctx);
+        assert!(core.controller.is_window_visible());
+
+        // ToggleMonitoring when NIM is empty opens onboarding/status error and reveals window.
+        core.controller.set_window_visible(false);
+        core.execute_tray_command(TrayCommand::ToggleMonitoring, &ctx);
+        assert!(core.controller.is_window_visible());
+        assert!(core.settings.status_is_error);
+
+        // ScanNow when stopped does not panic or quit.
+        core.execute_tray_command(TrayCommand::ScanNow, &ctx);
+        assert!(!core.quit_requested);
+
+        // Quit sets quit_requested and clears tray handle cleanly.
+        core.execute_tray_command(TrayCommand::Quit, &ctx);
+        assert!(core.quit_requested);
+        assert!(core.tray.is_none());
+    }
+
+    #[test]
+    fn theme_toggle_and_settings_preview_stay_synchronized() {
+        let ctx = egui::Context::default();
+        let app = DesktopApp::new_headless(
+            &ctx,
+            AppPrefs {
+                theme: ThemePreference::System,
+                ..AppPrefs::default()
+            },
+            Box::new(MemoryFallbackStore::new()),
+        );
+        let mut core = app.core.borrow_mut();
+
+        // System defaults to Light in headless context -> toggle flips to Dark and syncs settings.
+        core.toggle_theme(&ctx);
+        assert_eq!(core.prefs.theme, ThemePreference::Dark);
+        assert_eq!(core.settings.theme, ThemePreference::Dark);
+
+        // Opening settings keeps theme and presets synced; previewing changes and closing reverts.
+        core.open_settings();
+        assert_eq!(core.settings.theme, ThemePreference::Dark);
+        assert_eq!(
+            core.settings.light_preset,
+            prefs::LightThemePreset::DefaultLight
+        );
+        assert_eq!(
+            core.settings.dark_preset,
+            prefs::DarkThemePreset::DefaultDark
+        );
+        core.settings.theme = ThemePreference::Light;
+        core.settings.light_preset = prefs::LightThemePreset::SolarizedLight;
+        core.settings.dark_preset = prefs::DarkThemePreset::Everforest;
+        core.close_settings(&ctx);
+        assert_eq!(core.prefs.theme, ThemePreference::Dark);
+        assert_eq!(core.settings.theme, ThemePreference::Dark);
+        assert_eq!(
+            core.settings.light_preset,
+            prefs::LightThemePreset::DefaultLight
+        );
+        assert_eq!(
+            core.settings.dark_preset,
+            prefs::DarkThemePreset::DefaultDark
+        );
     }
 }

@@ -108,32 +108,76 @@ pub fn draw_sun(painter: &egui::Painter, rect: Rect, color: Color32) {
     }
 }
 
+/// Compute closed crescent moon outline points inside `rect` using exact circle-circle intersection.
+fn moon_outline_points(rect: Rect) -> Vec<Pos2> {
+    let dim = rect.width().min(rect.height());
+    let radius = dim * 0.37;
+    let cut_dist = dim * 0.23;
+    let cut_radius = dim * 0.31;
+    let cut_angle = -0.65_f32;
+    let ux = cut_angle.cos();
+    let uy = cut_angle.sin();
+
+    // Shift outer center slightly toward the cutout so the crescent sits optically centered.
+    let c1 = Pos2::new(rect.center().x + dim * 0.05, rect.center().y - dim * 0.03);
+    let c2 = Pos2::new(c1.x + cut_dist * ux, c1.y + cut_dist * uy);
+
+    let a = (radius * radius - cut_radius * cut_radius + cut_dist * cut_dist) / (2.0 * cut_dist);
+    let h = (radius * radius - a * a).max(0.0).sqrt();
+    let mid = Pos2::new(c1.x + a * ux, c1.y + a * uy);
+    let vx = -uy;
+    let vy = ux;
+
+    let p_start = Pos2::new(mid.x + h * vx, mid.y + h * vy);
+    let p_end = Pos2::new(mid.x - h * vx, mid.y - h * vy);
+
+    let tau = std::f32::consts::TAU;
+    let a0 = (p_start.y - c1.y).atan2(p_start.x - c1.x);
+    let a1 = (p_end.y - c1.y).atan2(p_end.x - c1.x);
+    let pos_delta_out = (a1 - a0).rem_euclid(tau);
+    let mid_out = a0 + pos_delta_out * 0.5;
+    let outer_sweep = if mid_out.cos() * ux + mid_out.sin() * uy < 0.0 {
+        pos_delta_out
+    } else {
+        pos_delta_out - tau
+    };
+
+    let b0 = (p_end.y - c2.y).atan2(p_end.x - c2.x);
+    let b1 = (p_start.y - c2.y).atan2(p_start.x - c2.x);
+    let pos_delta_in = (b1 - b0).rem_euclid(tau);
+    let mid_in = b0 + pos_delta_in * 0.5;
+    let inner_sweep = if mid_in.cos() * ux + mid_in.sin() * uy < 0.0 {
+        pos_delta_in
+    } else {
+        pos_delta_in - tau
+    };
+
+    let outer_steps = 18;
+    let inner_steps = 14;
+    let mut pts = Vec::with_capacity(outer_steps + inner_steps);
+    for i in 0..=outer_steps {
+        let t = i as f32 / outer_steps as f32;
+        let angle = a0 + outer_sweep * t;
+        pts.push(Pos2::new(
+            c1.x + radius * angle.cos(),
+            c1.y + radius * angle.sin(),
+        ));
+    }
+    for i in 1..inner_steps {
+        let t = i as f32 / inner_steps as f32;
+        let angle = b0 + inner_sweep * t;
+        pts.push(Pos2::new(
+            c2.x + cut_radius * angle.cos(),
+            c2.y + cut_radius * angle.sin(),
+        ));
+    }
+    pts
+}
+
 /// Draw a crescent moon icon (dark theme) inside `rect`.
 pub fn draw_moon(painter: &egui::Painter, rect: Rect, color: Color32) {
-    let center = rect.center();
-    let radius = rect.width().min(rect.height()) * 0.34;
-    let stroke = Stroke::new(1.5_f32, color);
-    let outer_pts: Vec<Pos2> = (0..=14)
-        .map(|i| {
-            let t = i as f32 / 14.0;
-            let a = -1.1 + t * (std::f32::consts::PI * 1.35);
-            Pos2::new(center.x + radius * a.cos(), center.y + radius * a.sin())
-        })
-        .collect();
-    let inner_center = Pos2::new(center.x + radius * 0.38, center.y - radius * 0.22);
-    let inner_r = radius * 0.78;
-    let inner_pts: Vec<Pos2> = (0..=10)
-        .map(|i| {
-            let t = i as f32 / 10.0;
-            let a = std::f32::consts::PI * 0.85 - t * (std::f32::consts::PI * 0.95);
-            Pos2::new(
-                inner_center.x + inner_r * a.cos(),
-                inner_center.y + inner_r * a.sin(),
-            )
-        })
-        .collect();
-    painter.add(egui::Shape::line(outer_pts, stroke));
-    painter.add(egui::Shape::line(inner_pts, stroke));
+    let pts = moon_outline_points(rect);
+    painter.add(egui::Shape::closed_line(pts, Stroke::new(1.5_f32, color)));
 }
 
 /// Draw a desktop monitor icon (system theme) inside `rect`.
@@ -299,20 +343,87 @@ pub fn draw_lock(painter: &egui::Painter, rect: Rect, color: Color32) {
     let shackle_x0 = r.center().x - shackle_w * 0.5;
     let shackle_x1 = r.center().x + shackle_w * 0.5;
     let shackle_top = r.top() + r.height() * 0.06;
-    let arch: Vec<Pos2> = (0..=8)
-        .map(|i| {
-            let t = i as f32 / 8.0;
-            let a = std::f32::consts::PI * (1.0 - t);
-            Pos2::new(
-                r.center().x + (shackle_w * 0.5) * a.cos(),
-                body.top() - r.height() * 0.14 - (r.height() * 0.22) * a.sin(),
-            )
-        })
-        .collect();
-    painter.line_segment([Pos2::new(shackle_x0, body.top()), arch[0]], stroke);
-    painter.add(egui::Shape::line(arch.clone(), stroke));
-    if let Some(&last) = arch.last() {
-        painter.line_segment([last, Pos2::new(shackle_x1, body.top())], stroke);
+    let mut shackle = Vec::with_capacity(11);
+    shackle.push(Pos2::new(shackle_x0, body.top()));
+    for i in 0..=8 {
+        let t = i as f32 / 8.0;
+        let a = std::f32::consts::PI * (1.0 - t);
+        shackle.push(Pos2::new(
+            r.center().x + (shackle_w * 0.5) * a.cos(),
+            body.top() - r.height() * 0.14 - (r.height() * 0.22) * a.sin(),
+        ));
     }
+    shackle.push(Pos2::new(shackle_x1, body.top()));
+    painter.add(egui::Shape::line(shackle, stroke));
     let _ = shackle_top;
+}
+
+/// Draw a crisp `X` close icon inside `rect`.
+pub fn draw_close(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let r = rect.shrink(rect.width().min(rect.height()) * 0.24);
+    let stroke = Stroke::new(1.7_f32, color);
+    painter.line_segment([r.left_top(), r.right_bottom()], stroke);
+    painter.line_segment([r.right_top(), r.left_bottom()], stroke);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn segments_intersect(a: Pos2, b: Pos2, c: Pos2, d: Pos2) -> bool {
+        fn orient(p: Pos2, q: Pos2, r: Pos2) -> f32 {
+            (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x)
+        }
+        let o1 = orient(a, b, c);
+        let o2 = orient(a, b, d);
+        let o3 = orient(c, d, a);
+        let o4 = orient(c, d, b);
+        (o1 * o2 < 0.0) && (o3 * o4 < 0.0)
+    }
+
+    #[test]
+    fn moon_outline_forms_simple_closed_crescent_within_bounds() {
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::splat(16.0));
+        let pts = moon_outline_points(rect);
+        assert!(pts.len() >= 24);
+
+        for p in &pts {
+            assert!(
+                rect.contains(*p),
+                "moon point {p:?} fell outside icon rect {rect:?}"
+            );
+        }
+
+        // Verify exact cusp intersection at start and outer-arc end (index 18).
+        let c1 = Pos2::new(rect.center().x + 16.0 * 0.05, rect.center().y - 16.0 * 0.03);
+        let cut_angle = -0.65_f32;
+        let c2 = Pos2::new(
+            c1.x + 16.0 * 0.23 * cut_angle.cos(),
+            c1.y + 16.0 * 0.23 * cut_angle.sin(),
+        );
+        for cusp in [pts[0], pts[18]] {
+            let d1 = (cusp - c1).length();
+            let d2 = (cusp - c2).length();
+            assert!((d1 - 16.0 * 0.37).abs() < 1e-3);
+            assert!((d2 - 16.0 * 0.31).abs() < 1e-3);
+        }
+
+        // Verify the closed loop has zero non-adjacent self-intersections.
+        let n = pts.len();
+        for i in 0..n {
+            let a = pts[i];
+            let b = pts[(i + 1) % n];
+            for j in (i + 2)..n {
+                if i == 0 && j == n - 1 {
+                    continue;
+                }
+                let c = pts[j];
+                let d = pts[(j + 1) % n];
+                assert!(
+                    !segments_intersect(a, b, c, d),
+                    "moon outline self-intersects between edge {i} and edge {j}"
+                );
+            }
+        }
+    }
 }

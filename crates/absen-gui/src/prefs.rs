@@ -24,6 +24,97 @@ pub enum ThemePreference {
     System,
 }
 
+/// Curated Antigravity Light theme presets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LightThemePreset {
+    #[default]
+    DefaultLight,
+    LegacyLight,
+    Catppuccin,
+    Everforest,
+    GruvboxMaterial,
+    OneLight,
+    SolarizedLight,
+}
+
+impl LightThemePreset {
+    pub const ALL: [Self; 7] = [
+        Self::DefaultLight,
+        Self::LegacyLight,
+        Self::Catppuccin,
+        Self::Everforest,
+        Self::GruvboxMaterial,
+        Self::OneLight,
+        Self::SolarizedLight,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::DefaultLight => "Default Light",
+            Self::LegacyLight => "Legacy Light",
+            Self::Catppuccin => "Catppuccin",
+            Self::Everforest => "Everforest",
+            Self::GruvboxMaterial => "Gruvbox Material",
+            Self::OneLight => "One Light",
+            Self::SolarizedLight => "Solarized Light",
+        }
+    }
+}
+
+/// Curated Antigravity Dark theme presets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DarkThemePreset {
+    #[default]
+    DefaultDark,
+    LegacyDark,
+    Catppuccin,
+    Dracula,
+    Everforest,
+    GruvboxMaterial,
+    Monokai,
+    Nord,
+    OneDarkPro,
+    TokyoNight,
+    SolarizedDark,
+    Vesper,
+}
+
+impl DarkThemePreset {
+    pub const ALL: [Self; 12] = [
+        Self::DefaultDark,
+        Self::LegacyDark,
+        Self::Catppuccin,
+        Self::Dracula,
+        Self::Everforest,
+        Self::GruvboxMaterial,
+        Self::Monokai,
+        Self::Nord,
+        Self::OneDarkPro,
+        Self::TokyoNight,
+        Self::SolarizedDark,
+        Self::Vesper,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::DefaultDark => "Default Dark",
+            Self::LegacyDark => "Legacy Dark",
+            Self::Catppuccin => "Catppuccin",
+            Self::Dracula => "Dracula",
+            Self::Everforest => "Everforest",
+            Self::GruvboxMaterial => "Gruvbox Material",
+            Self::Monokai => "Monokai",
+            Self::Nord => "Nord",
+            Self::OneDarkPro => "One Dark Pro",
+            Self::TokyoNight => "Tokyo Night",
+            Self::SolarizedDark => "Solarized Dark",
+            Self::Vesper => "Vesper",
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum PrefsError {
     #[error("direktori konfigurasi aplikasi tidak tersedia")]
@@ -50,6 +141,8 @@ pub struct AppPrefs {
     pub max_retry: u32,
     pub retry_wait: f64,
     pub theme: ThemePreference,
+    pub light_preset: LightThemePreset,
+    pub dark_preset: DarkThemePreset,
     pub minimize_to_tray: bool,
     pub autostart: bool,
     pub notifications_enabled: bool,
@@ -69,6 +162,8 @@ impl Default for AppPrefs {
             max_retry: DEFAULT_MAX_RETRY,
             retry_wait: DEFAULT_RETRY_WAIT,
             theme: ThemePreference::System,
+            light_preset: LightThemePreset::DefaultLight,
+            dark_preset: DarkThemePreset::DefaultDark,
             minimize_to_tray: true,
             autostart: false,
             notifications_enabled: true,
@@ -290,6 +385,8 @@ mod tests {
             max_retry: 4,
             retry_wait: 1.5,
             theme: ThemePreference::Dark,
+            light_preset: LightThemePreset::Catppuccin,
+            dark_preset: DarkThemePreset::Everforest,
             minimize_to_tray: false,
             autostart: true,
             notifications_enabled: false,
@@ -300,6 +397,8 @@ mod tests {
         save_to_path(&prefs, &path).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(!raw.contains("password"));
+        assert!(raw.contains("\"catppuccin\""));
+        assert!(raw.contains("\"everforest\""));
 
         let loaded = load_from_path(&path).unwrap();
         assert_eq!(loaded, prefs);
@@ -312,6 +411,37 @@ mod tests {
         assert_eq!(load_from_path(&path).unwrap().interval, 90);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn theme_presets_roundtrip_and_backward_compatible_json_defaults() {
+        let legacy_json = r#"{
+            "nim": "251511099",
+            "base_url": "https://akademik.polban.ac.id",
+            "target_url": "https://akademik.polban.ac.id/ajar/absen",
+            "interval": 60,
+            "theme": "dark"
+        }"#;
+        let legacy_prefs: AppPrefs = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(legacy_prefs.theme, ThemePreference::Dark);
+        assert_eq!(legacy_prefs.light_preset, LightThemePreset::DefaultLight);
+        assert_eq!(legacy_prefs.dark_preset, DarkThemePreset::DefaultDark);
+
+        assert_eq!(LightThemePreset::ALL.len(), 7);
+        for preset in LightThemePreset::ALL {
+            assert!(!preset.label().is_empty());
+            let json = serde_json::to_string(&preset).unwrap();
+            let decoded: LightThemePreset = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, preset);
+        }
+
+        assert_eq!(DarkThemePreset::ALL.len(), 12);
+        for preset in DarkThemePreset::ALL {
+            assert!(!preset.label().is_empty());
+            let json = serde_json::to_string(&preset).unwrap();
+            let decoded: DarkThemePreset = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, preset);
+        }
     }
 
     #[test]

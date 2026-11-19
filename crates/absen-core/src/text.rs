@@ -190,6 +190,14 @@ mod tests {
         assert_eq!(jam_ringkas("07:00-09:30"), "07:00-09:30");
         assert!(matches!(jam_ringkas("07:00-09:30"), Cow::Borrowed(_)));
         assert_eq!(jam_ringkas("jadwal fleksibel"), "jadwal fleksibel");
+        assert_eq!(
+            jam_ringkas("Café — 07:00:00 s.d. 09:30:00 (Ruang Lab)"),
+            "07:00-09:30"
+        );
+        assert_eq!(
+            jam_ringkas("Pemrograman – Tidak ada jam"),
+            "Pemrograman – Tidak ada jam"
+        );
     }
 
     #[test]

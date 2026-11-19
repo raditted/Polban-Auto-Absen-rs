@@ -1,4 +1,9 @@
-//! Deterministic RGBA app and tray icon generator with `PA` Cobalt monogram.
+//! Application and system tray icon loader backed by `assets/app-icon.png`.
+
+use std::sync::OnceLock;
+
+use image::imageops::FilterType;
+use image::{ImageFormat, RgbaImage};
 
 /// Optional status indicator drawn on the bottom-right corner of the icon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8,9 +13,18 @@ pub enum IconStatus {
     Error,
 }
 
-const COBALT: [u8; 3] = [0x1D, 0x4E, 0xD8];
-const WHITE: [u8; 3] = [0xFF, 0xFF, 0xFF];
+const APP_ICON_PNG: &[u8] = include_bytes!("../../../assets/app-icon.png");
 const RING_DARK: [u8; 3] = [0x0F, 0x17, 0x2A];
+
+static BASE_ICON_RGBA: OnceLock<RgbaImage> = OnceLock::new();
+
+fn base_icon() -> &'static RgbaImage {
+    BASE_ICON_RGBA.get_or_init(|| {
+        image::load_from_memory_with_format(APP_ICON_PNG, ImageFormat::Png)
+            .map(|img| img.to_rgba8())
+            .unwrap_or_else(|_| RgbaImage::from_pixel(64, 64, image::Rgba([0xFF, 0xFF, 0xFF, 0xFF])))
+    })
+}
 
 fn status_color(status: IconStatus) -> [u8; 3] {
     match status {
@@ -18,64 +32,6 @@ fn status_color(status: IconStatus) -> [u8; 3] {
         IconStatus::Monitoring => [0x10, 0xB9, 0x81],
         IconStatus::Error => [0xEF, 0x44, 0x44],
     }
-}
-
-/// Signed distance to a rounded rectangle centered at `(0.5, 0.5)` in `[0, 1]^2`.
-fn sd_rounded_box(px: f32, py: f32, half_extent: f32, radius: f32) -> f32 {
-    let dx = (px - 0.5).abs() - (half_extent - radius);
-    let dy = (py - 0.5).abs() - (half_extent - radius);
-    let ox = dx.max(0.0);
-    let oy = dy.max(0.0);
-    (ox * ox + oy * oy).sqrt() + dx.max(dy).min(0.0) - radius
-}
-
-/// Distance from point `(px, py)` to segment `(x1, y1)-(x2, y2)`.
-fn dist_segment(px: f32, py: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
-    let vx = x2 - x1;
-    let vy = y2 - y1;
-    let wx = px - x1;
-    let wy = py - y1;
-    let len_sq = vx * vx + vy * vy;
-    if len_sq <= f32::EPSILON {
-        return (wx * wx + wy * wy).sqrt();
-    }
-    let t = ((wx * vx + wy * vy) / len_sq).clamp(0.0, 1.0);
-    let cx = x1 + t * vx;
-    let cy = y1 + t * vy;
-    ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()
-}
-
-/// Distance to the geometric `PA` monogram in normalized `[0, 1]^2` coordinates.
-fn sd_monogram_pa(px: f32, py: f32) -> f32 {
-    let stroke = 0.048_f32;
-
-    // Letter P (left side)
-    let p_stem = dist_segment(px, py, 0.22, 0.29, 0.22, 0.71);
-    let p_top = dist_segment(px, py, 0.22, 0.29, 0.36, 0.29);
-    let p_mid = dist_segment(px, py, 0.22, 0.50, 0.36, 0.50);
-    // Bowl arc on the right side of P
-    let arc_cx = 0.36_f32;
-    let arc_cy = 0.395_f32;
-    let arc_r = 0.105_f32;
-    let p_arc = if px >= arc_cx {
-        (((px - arc_cx).powi(2) + (py - arc_cy).powi(2)).sqrt() - arc_r).abs()
-    } else {
-        f32::MAX
-    };
-
-    // Letter A (right side)
-    let a_left = dist_segment(px, py, 0.54, 0.71, 0.67, 0.29);
-    let a_right = dist_segment(px, py, 0.80, 0.71, 0.67, 0.29);
-    let a_bar = dist_segment(px, py, 0.59, 0.57, 0.75, 0.57);
-
-    let min_d = p_stem
-        .min(p_top)
-        .min(p_mid)
-        .min(p_arc)
-        .min(a_left)
-        .min(a_right)
-        .min(a_bar);
-    min_d - stroke
 }
 
 fn blend_pixel(dst: &mut [u8; 4], src_rgb: [u8; 3], coverage: f32) {
@@ -98,53 +54,45 @@ fn blend_pixel(dst: &mut [u8; 4], src_rgb: [u8; 3], coverage: f32) {
     dst[3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
 }
 
-/// Generate deterministic RGBA8888 pixels `(rgba, width, height)` for the given square size.
+/// Generate RGBA8888 pixels `(rgba, width, height)` for the given square size
+/// from the bundled `assets/app-icon.png` asset with an optional status badge.
 pub fn generate_rgba(size: u32, status: Option<IconStatus>) -> (Vec<u8>, u32, u32) {
     let size = size.max(16);
-    let mut rgba = vec![0u8; (size as usize) * (size as usize) * 4];
-    let inv = 1.0 / (size as f32);
-    let aa = inv * 0.9;
+    let base = base_icon();
+    let resized = if base.width() == size && base.height() == size {
+        base.clone()
+    } else {
+        image::imageops::resize(base, size, size, FilterType::Lanczos3)
+    };
+    let mut rgba = resized.into_raw();
 
-    for y in 0..size {
-        for x in 0..size {
-            let px = (x as f32 + 0.5) * inv;
-            let py = (y as f32 + 0.5) * inv;
-            let mut pixel = [0u8, 0u8, 0u8, 0u8];
+    if let Some(st) = status {
+        let inv = 1.0 / (size as f32);
+        let aa = inv * 0.9;
+        let cx = 0.78_f32;
+        let cy = 0.78_f32;
+        let outer_r = 0.195_f32;
+        let inner_r = 0.140_f32;
+        let dot_rgb = status_color(st);
 
-            // Rounded square Cobalt background
-            let d_box = sd_rounded_box(px, py, 0.45, 0.14);
-            let box_cov = (0.5 - d_box / aa).clamp(0.0, 1.0);
-            if box_cov > 0.0 {
-                blend_pixel(&mut pixel, COBALT, box_cov);
-
-                // Crisp white PA monogram clipped to background
-                let d_pa = sd_monogram_pa(px, py);
-                let pa_cov = (0.5 - d_pa / aa).clamp(0.0, 1.0) * box_cov;
-                if pa_cov > 0.0 {
-                    blend_pixel(&mut pixel, WHITE, pa_cov);
-                }
-            }
-
-            // Optional bottom-right circular status badge
-            if let Some(st) = status {
-                let cx = 0.78_f32;
-                let cy = 0.78_f32;
+        for y in 0..size {
+            for x in 0..size {
+                let px = (x as f32 + 0.5) * inv;
+                let py = (y as f32 + 0.5) * inv;
                 let dist = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt();
-                let outer_r = 0.185_f32;
-                let inner_r = 0.135_f32;
-
                 let ring_cov = (0.5 - (dist - outer_r) / aa).clamp(0.0, 1.0);
-                if ring_cov > 0.0 {
-                    blend_pixel(&mut pixel, RING_DARK, ring_cov);
+                if ring_cov <= 0.0 {
+                    continue;
                 }
+                let idx = ((y * size + x) as usize) * 4;
+                let mut pixel = [rgba[idx], rgba[idx + 1], rgba[idx + 2], rgba[idx + 3]];
+                blend_pixel(&mut pixel, RING_DARK, ring_cov);
                 let dot_cov = (0.5 - (dist - inner_r) / aa).clamp(0.0, 1.0);
                 if dot_cov > 0.0 {
-                    blend_pixel(&mut pixel, status_color(st), dot_cov);
+                    blend_pixel(&mut pixel, dot_rgb, dot_cov);
                 }
+                rgba[idx..idx + 4].copy_from_slice(&pixel);
             }
-
-            let idx = ((y * size + x) as usize) * 4;
-            rgba[idx..idx + 4].copy_from_slice(&pixel);
         }
     }
 
@@ -184,26 +132,26 @@ mod tests {
     }
 
     #[test]
-    fn contains_cobalt_white_and_transparent_corners() {
-        let (buf, w, _) = generate_rgba(64, None);
-        // Top-left corner (0, 0) should be outside rounded rect -> transparent.
-        assert_eq!(buf[3], 0);
+    fn bundled_app_icon_decodes_with_artwork_pixels() {
+        let (buf, w, h) = generate_rgba(256, None);
+        assert_eq!((w, h), (256, 256));
+        assert_eq!(buf.len(), 256 * 256 * 4);
 
-        let mut has_cobalt = false;
-        let mut has_white = false;
+        let mut has_warm_artwork = false;
+        let mut has_opaque = false;
         for chunk in buf.as_chunks::<4>().0 {
-            if chunk[3] > 240 {
-                if chunk[0] < 45 && chunk[1] < 95 && chunk[2] > 195 {
-                    has_cobalt = true;
-                }
-                if chunk[0] > 240 && chunk[1] > 240 && chunk[2] > 240 {
-                    has_white = true;
-                }
+            if chunk[3] == 255 {
+                has_opaque = true;
+            }
+            if chunk[0] > 180 && chunk[1] < 160 && chunk[2] < 160 {
+                has_warm_artwork = true;
             }
         }
-        assert!(has_cobalt, "expected Cobalt background pixels");
-        assert!(has_white, "expected white monogram pixels");
-        assert_eq!(w, 64);
+        assert!(has_opaque, "expected opaque pixels from app-icon.png");
+        assert!(
+            has_warm_artwork,
+            "expected character hair/accent pixels from app-icon.png"
+        );
     }
 
     #[test]
@@ -225,9 +173,9 @@ mod tests {
 
     #[test]
     fn egui_icon_has_valid_dimensions() {
-        let icon = egui_icon(64, None);
-        assert_eq!(icon.width, 64);
-        assert_eq!(icon.height, 64);
-        assert_eq!(icon.rgba.len(), 64 * 64 * 4);
+        let icon = egui_icon(256, None);
+        assert_eq!(icon.width, 256);
+        assert_eq!(icon.height, 256);
+        assert_eq!(icon.rgba.len(), 256 * 256 * 4);
     }
 }

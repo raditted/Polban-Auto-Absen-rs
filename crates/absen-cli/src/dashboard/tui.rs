@@ -3,6 +3,7 @@
 use std::io::{self, IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::sync::Once;
 use std::time::{Duration, Instant};
 
 use absen_core::text::jam_ringkas;
@@ -40,6 +41,11 @@ const BORDER_ASCII: border::Set = border::Set {
 
 static TERMINAL_ACTIVE: AtomicBool = AtomicBool::new(false);
 static ALT_SCREEN_ACTIVE: AtomicBool = AtomicBool::new(false);
+static PANIC_HOOK_ONCE: Once = Once::new();
+
+pub(crate) fn is_terminal_active() -> bool {
+    TERMINAL_ACTIVE.load(Ordering::SeqCst)
+}
 
 fn restore_terminal_state() {
     if !TERMINAL_ACTIVE.swap(false, Ordering::SeqCst) {
@@ -48,6 +54,7 @@ fn restore_terminal_state() {
     let mut stdout = io::stdout();
     let _ = execute!(stdout, Show);
     if ALT_SCREEN_ACTIVE.swap(false, Ordering::SeqCst) {
+        let _ = stdout.write_all(b"\x1b[?1007l");
         let _ = execute!(stdout, LeaveAlternateScreen);
     }
     let _ = disable_raw_mode();
@@ -94,11 +101,13 @@ impl Drop for TerminalGuard {
 }
 
 fn install_panic_hook() {
-    let prev = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        restore_terminal_state();
-        prev(info);
-    }));
+    PANIC_HOOK_ONCE.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            restore_terminal_state();
+            prev(info);
+        }));
+    });
 }
 
 /// Format local date in Indonesian (manual Weekday & Month mapping).
@@ -626,7 +635,7 @@ fn render_jadwal_panel(state: &DashboardState, width: u16, opts: &RenderOptions)
             };
 
             let row_h = mk_lines.len().max(dosen_lines.len()).max(1) as u16;
-            body_lines += row_h;
+            body_lines = body_lines.saturating_add(row_h);
 
             let mut cells = vec![
                 Cell::from(Line::from(no_str).alignment(Alignment::Right)).style(dim),
@@ -648,7 +657,7 @@ fn render_jadwal_panel(state: &DashboardState, width: u16, opts: &RenderOptions)
     }
 
     // Header takes 1 line (+ 1 separator line under header in slim/table style) + 2 outer borders.
-    let height = 2 + 1 + 1 + body_lines;
+    let height = body_lines.saturating_add(4);
     let area = Rect::new(0, 0, width, height);
     let mut buf = Buffer::empty(area);
 
@@ -795,15 +804,26 @@ fn select_footer(
 }
 
 fn blit_buffer(src: &Buffer, dst: &mut Buffer, dst_x: u16, dst_y: u16, src_y: usize, rows: usize) {
-    let max_x = src.area.width.min(dst.area.width.saturating_sub(dst_x));
+    if dst_x < dst.area.left() || dst_x >= dst.area.right() {
+        return;
+    }
+    let max_x = src
+        .area
+        .width
+        .min(dst.area.right().saturating_sub(dst_x));
     for dy in 0..rows {
         let sy = src_y + dy;
-        let ty = dst_y + dy as u16;
-        if sy >= src.area.height as usize || ty >= dst.area.height {
+        let Some(ty) = dst_y.checked_add(dy as u16) else {
+            break;
+        };
+        if sy >= src.area.height as usize || ty >= dst.area.bottom() {
             break;
         }
+        if ty < dst.area.top() {
+            continue;
+        }
         for dx in 0..max_x {
-            let s_cell = &src[(dx, sy as u16)];
+            let s_cell = &src[(src.area.x + dx, src.area.y + sy as u16)];
             let d_cell = &mut dst[(dst_x + dx, ty)];
             *d_cell = s_cell.clone();
         }
@@ -874,7 +894,12 @@ pub fn render_dashboard(
     let roomy = area.width >= 80 && area.height >= 30;
     let pad_y: u16 = if roomy { 1 } else { 0 };
     let pad_x: u16 = if roomy { 2 } else { 1 };
-    let inner_w = area.width.saturating_sub(2 + 2 * pad_x).max(10);
+    let max_content_w = area.width.saturating_sub(2 + pad_x).max(1);
+    let inner_w = area
+        .width
+        .saturating_sub(2 + 2 * pad_x)
+        .max(10)
+        .min(max_content_w);
     let view_h = area.height.saturating_sub(2 + 2 * pad_y).max(1);
 
     let body = build_body_buffer(
@@ -1046,7 +1071,7 @@ pub fn run_tui(
     let viewport = if opts.alt_screen {
         Viewport::Fullscreen
     } else {
-        Viewport::Inline(term_size.1.min(28))
+        Viewport::Inline(term_size.1.clamp(1, 28))
     };
     let mut terminal = Terminal::with_options(backend, TerminalOptions { viewport })?;
     let mut view = ViewState::default();
@@ -1092,7 +1117,7 @@ pub fn run_tui(
 
         if ct_event::poll(Duration::from_millis(50))? {
             let mut should_quit = false;
-            loop {
+            for _ in 0..64 {
                 let ev = ct_event::read()?;
                 if matches!(ev, ct_event::Event::Resize(_, _)) {
                     dirty = true;
@@ -1136,7 +1161,7 @@ pub fn run_tui(
 
 /// Run plain reporter when TUI is disabled (`--plain` or non-TTY).
 pub fn is_interactive_tty() -> bool {
-    io::stdout().is_terminal()
+    io::stdout().is_terminal() && io::stdin().is_terminal()
 }
 
 #[cfg(test)]
@@ -1343,5 +1368,58 @@ mod tests {
         assert!(screen.contains("|"));
         assert!(!screen.contains("╭"));
         assert!(!screen.contains("█"));
+    }
+
+    #[test]
+    fn renders_inline_viewport_with_nonzero_origin_without_clipping() {
+        let st = sample_state();
+        let mut view = ViewState::default();
+        let mut opts = fixed_opts(false);
+        opts.alt_screen = false;
+
+        // area.top() (25) > area.height (22) would have clipped everything under the old bug.
+        let area = Rect::new(0, 25, 80, 22);
+        let mut buf = Buffer::empty(area);
+        render_dashboard(&mut buf, area, &st, &mut view, &opts);
+
+        let extract = |b: &Buffer| {
+            let mut text = String::new();
+            for y in area.top()..area.bottom() {
+                for x in area.left()..area.right() {
+                    text.push_str(b[(x, y)].symbol());
+                }
+                text.push('\n');
+            }
+            text
+        };
+
+        let top_text = extract(&buf);
+        assert!(top_text.contains("Budi Santoso"), "inline origin failed:\n{top_text}");
+        assert!(top_text.contains("Jadwal Hari Ini"), "inline origin failed:\n{top_text}");
+
+        view.apply_scroll(ScrollAction::End);
+        let mut buf2 = Buffer::empty(area);
+        render_dashboard(&mut buf2, area, &st, &mut view, &opts);
+        let bottom_text = extract(&buf2);
+        assert!(
+            bottom_text.contains("Struktur Data"),
+            "inline scrolled failed:\n{bottom_text}"
+        );
+    }
+
+    #[test]
+    fn renders_extreme_small_and_unicode_without_panicking() {
+        let mut st = sample_state();
+        st.user_info.nama = "Éka Pratama — Ünicode 🚀".into();
+        st.jadwal[0].nama = "Pemrograman Berorientasi Objek — Kelas Khusus 🚀".into();
+        st.jadwal[0].dosen = "Dr. Ångström, M.Kom — Tim Pengajar".into();
+
+        let opts = fixed_opts(false);
+        for (w, h) in [(0, 0), (3, 3), (4, 4), (10, 6), (15, 10), (24, 12)] {
+            let mut view = ViewState::default();
+            let area = Rect::new(0, 0, w, h);
+            let mut buf = Buffer::empty(area);
+            render_dashboard(&mut buf, area, &st, &mut view, &opts);
+        }
     }
 }

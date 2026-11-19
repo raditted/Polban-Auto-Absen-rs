@@ -49,7 +49,8 @@ impl ClickedState {
         let mut sigs = BTreeSet::new();
 
         if let Ok(raw) = std::fs::read_to_string(&path) {
-            if let Ok(parsed) = serde_json::from_str::<StateFileJson>(&raw) {
+            let clean = raw.strip_prefix('\u{feff}').unwrap_or(&raw);
+            if let Ok(parsed) = serde_json::from_str::<StateFileJson>(clean) {
                 if parsed.date == today_str {
                     sigs.extend(parsed.sigs);
                 }
@@ -103,13 +104,36 @@ impl ClickedState {
         self.save()
     }
 
-    /// Write current state to disk in Python-compatible sorted JSON format.
+    /// Write current state to disk atomically in Python-compatible sorted JSON format.
     pub fn save(&self) -> Result<(), StateError> {
         let payload = StateFileJson {
             date: self.date.clone(),
             sigs: self.sigs.iter().cloned().collect(),
         };
         let json = serde_json::to_string(&payload)?;
+        if let Some(parent) = self.path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent).map_err(|source| StateError::Save {
+                path: self.path.clone(),
+                source,
+            })?;
+        }
+
+        let tmp_name = format!(
+            ".{}.tmp.{}",
+            self.path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("clicked"),
+            std::process::id()
+        );
+        let tmp_path = self.path.with_file_name(tmp_name);
+        if std::fs::write(&tmp_path, &json).is_ok() {
+            if std::fs::rename(&tmp_path, &self.path).is_ok() {
+                return Ok(());
+            }
+            let _ = std::fs::remove_file(&tmp_path);
+        }
+
         std::fs::write(&self.path, json).map_err(|source| StateError::Save {
             path: self.path.clone(),
             source,
@@ -180,6 +204,28 @@ mod tests {
         let day = NaiveDate::from_ymd_opt(2026, 11, 17).unwrap();
         let st = ClickedState::load_for_date(&path, day);
         assert!(st.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn loads_utf8_bom_and_creates_missing_parent_dir_on_save() {
+        let dir =
+            std::env::temp_dir().join(format!("polban_absen_bom_state_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let nested_path = dir.join("nested").join("dir").join(".clicked.json");
+        let day = NaiveDate::from_ymd_opt(2026, 11, 17).unwrap();
+
+        let mut st = ClickedState::load_for_date(&nested_path, day);
+        st.insert_and_save_for_date("Pemrograman — Lanjut|Dr. Éka|07:00-09:30", day)
+            .unwrap();
+        assert!(nested_path.is_file());
+
+        // Prepend UTF-8 BOM and verify reload succeeds
+        let content = std::fs::read_to_string(&nested_path).unwrap();
+        std::fs::write(&nested_path, format!("\u{feff}{content}")).unwrap();
+        let reloaded = ClickedState::load_for_date(&nested_path, day);
+        assert!(reloaded.contains("Pemrograman — Lanjut|Dr. Éka|07:00-09:30"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
