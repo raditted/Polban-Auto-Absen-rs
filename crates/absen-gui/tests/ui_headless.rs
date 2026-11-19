@@ -208,7 +208,7 @@ fn first_run_onboarding_renders_inline_without_modal_in_light_and_dark() {
         assert!(text.contains("Masuk ke Portal Akademik Polban"));
         assert!(text.contains("NIM Mahasiswa"));
         assert!(text.contains("Kata Sandi Akademik"));
-        assert!(text.contains("Simpan & Mulai Pantau"));
+        assert!(text.contains("Simpan & Jalankan Presensi Otomatis"));
         assert!(text.contains("Impor dari .env"));
         assert!(text.contains("Memori Sesi"));
     }
@@ -918,4 +918,41 @@ fn settings_modal_displays_current_version_and_manual_update_check() {
     let text = collect_rendered_text(&scrolled_out);
     assert!(text.contains(&format!("v{CURRENT_VERSION}")));
     assert!(text.contains("Cek Pembaruan"));
+}
+
+#[test]
+fn header_jalankan_presensi_otomatis_fits_without_overlap_across_viewports() {
+    let viewports = [
+        ("narrow_680", Vec2::new(680.0, 540.0)),
+        ("medium_860", Vec2::new(860.0, 640.0)),
+        ("medium_960", Vec2::new(960.0, 640.0)),
+        ("desktop_1280", Vec2::new(1280.0, 800.0)),
+        ("ultrawide_1920", Vec2::new(1920.0, 1080.0)),
+    ];
+
+    for (vp_name, size) in viewports {
+        let ctx = egui::Context::default();
+        let mut app = DesktopApp::new_headless(
+            &ctx,
+            configured_prefs(ThemePreference::Light),
+            Box::new(MemoryFallbackStore::new()),
+        );
+        let mut idle_snap = sample_populated_snapshot();
+        idle_snap.status = EngineStatus::Idle;
+        app.set_test_snapshot(Some(idle_snap));
+
+        let out = run_frames(&ctx, &mut app, size, Vec::new());
+        assert_no_horizontal_overflow(&out, size.x, vp_name);
+        let rects = collect_text_rects(&out);
+        let start_rect = find_text_rect(&rects, "Jalankan Presensi Otomatis")
+            .unwrap_or_else(|| panic!("{vp_name} missing Jalankan Presensi Otomatis"));
+        let scan_rect = find_text_rect(&rects, "Cek Sekarang")
+            .unwrap_or_else(|| panic!("{vp_name} missing Cek Sekarang"));
+        let settings_rect = find_text_rect(&rects, "Pengaturan")
+            .unwrap_or_else(|| panic!("{vp_name} missing Pengaturan"));
+        assert!(
+            !start_rect.intersects(scan_rect) && !start_rect.intersects(settings_rect),
+            "{vp_name}: Jalankan Presensi Otomatis {start_rect:?} overlaps scan={scan_rect:?} or settings={settings_rect:?}"
+        );
+    }
 }

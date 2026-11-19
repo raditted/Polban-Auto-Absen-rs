@@ -36,6 +36,7 @@ struct AppCore {
     minimized_applied: bool,
     quit_requested: bool,
     headless: bool,
+    headless_tray_active: bool,
     test_snapshot: Option<GuiSnapshot>,
     diag_rx: Option<mpsc::Receiver<Result<PathBuf, String>>>,
     import_pick_rx: Option<mpsc::Receiver<Option<Result<DotenvImportResult, PrefsError>>>>,
@@ -656,11 +657,12 @@ impl AppCore {
         if ctx.input(|i| i.viewport().close_requested())
             && !self.quit_requested
             && self.prefs.minimize_to_tray
-            && self.tray.is_some()
+            && (self.tray.is_some() || self.headless_tray_active)
         {
             self.controller.set_window_visible(false);
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.notifier.notify_minimized_to_tray();
         }
 
         let palette = apply_appearance(ctx, self.active_appearance());
@@ -902,6 +904,7 @@ impl DesktopApp {
             minimized_applied: false,
             quit_requested: false,
             headless: false,
+            headless_tray_active: false,
             test_snapshot: None,
             diag_rx: None,
             import_pick_rx: None,
@@ -1027,6 +1030,7 @@ impl DesktopApp {
             minimized_applied: true,
             quit_requested: false,
             headless: true,
+            headless_tray_active: false,
             test_snapshot: None,
             diag_rx: None,
             import_pick_rx: None,
@@ -1068,6 +1072,18 @@ impl DesktopApp {
     /// Read the current `UpdateStatus` (used in tests).
     pub fn update_status(&self) -> UpdateStatus {
         self.core.borrow().updater.status.clone()
+    }
+
+    /// Enable simulated tray availability for headless close-to-tray tests.
+    pub fn set_headless_tray_active_for_test(&mut self, active: bool) {
+        self.core.borrow_mut().headless_tray_active = active;
+    }
+
+    /// Override the `Notifier` (for example with `Notifier::new_recorded`) in tests.
+    pub fn set_notifier_for_test(&mut self, notifier: Notifier) {
+        let mut core = self.core.borrow_mut();
+        core.notifier = notifier.clone();
+        core.controller.set_notifier(notifier);
     }
 
     /// Inject or clear a deterministic `GuiSnapshot` for headless UI testing.
@@ -1231,5 +1247,87 @@ mod tests {
             core.settings.dark_preset,
             prefs::DarkThemePreset::DefaultDark
         );
+    }
+
+    #[test]
+    fn close_to_tray_sends_notification_only_when_minimized_to_tray() {
+        let make_close_input = || {
+            let mut raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 640.0),
+                )),
+                ..Default::default()
+            };
+            raw.viewports.insert(
+                egui::ViewportId::ROOT,
+                egui::ViewportInfo {
+                    events: vec![egui::ViewportEvent::Close],
+                    ..Default::default()
+                },
+            );
+            raw
+        };
+
+        // 1. minimize_to_tray == true -> hides window and sends background tray notification.
+        let ctx1 = egui::Context::default();
+        let mut app1 = DesktopApp::new_headless(
+            &ctx1,
+            AppPrefs {
+                minimize_to_tray: true,
+                notifications_enabled: true,
+                ..AppPrefs::default()
+            },
+            Box::new(MemoryFallbackStore::new()),
+        );
+        let (notifier1, log1) = Notifier::new_recorded(true);
+        app1.set_notifier_for_test(notifier1);
+        app1.set_headless_tray_active_for_test(true);
+
+        let _ = ctx1.run(make_close_input(), |c| app1.update_ui(c));
+        assert!(!app1.core.borrow().controller.is_window_visible());
+        let events1 = log1.lock().unwrap().clone();
+        assert_eq!(events1.len(), 1);
+        assert_eq!(events1[0].0, "Polban Presensi");
+        assert!(events1[0].1.contains("system tray"));
+
+        // 2. minimize_to_tray == false -> does NOT send close-to-tray notification.
+        let ctx2 = egui::Context::default();
+        let mut app2 = DesktopApp::new_headless(
+            &ctx2,
+            AppPrefs {
+                minimize_to_tray: false,
+                notifications_enabled: true,
+                ..AppPrefs::default()
+            },
+            Box::new(MemoryFallbackStore::new()),
+        );
+        let (notifier2, log2) = Notifier::new_recorded(true);
+        app2.set_notifier_for_test(notifier2);
+        app2.set_headless_tray_active_for_test(true);
+
+        let _ = ctx2.run(make_close_input(), |c| app2.update_ui(c));
+        assert!(log2.lock().unwrap().is_empty());
+
+        // 3. Quitting from tray sets quit_requested -> does NOT send close-to-tray notification.
+        let ctx3 = egui::Context::default();
+        let mut app3 = DesktopApp::new_headless(
+            &ctx3,
+            AppPrefs {
+                minimize_to_tray: true,
+                notifications_enabled: true,
+                ..AppPrefs::default()
+            },
+            Box::new(MemoryFallbackStore::new()),
+        );
+        let (notifier3, log3) = Notifier::new_recorded(true);
+        app3.set_notifier_for_test(notifier3);
+        app3.set_headless_tray_active_for_test(true);
+        app3.core
+            .borrow_mut()
+            .execute_tray_command(TrayCommand::Quit, &ctx3);
+
+        let _ = ctx3.run(make_close_input(), |c| app3.update_ui(c));
+        assert!(log3.lock().unwrap().is_empty());
     }
 }

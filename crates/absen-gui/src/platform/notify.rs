@@ -1,9 +1,15 @@
 //! Desktop notification wrapper powered by `notify-rust`.
 
+use std::sync::{Arc, Mutex};
+
+/// Shared in-memory notification log used by deterministic tests.
+pub type NotificationLog = Arc<Mutex<Vec<(String, String)>>>;
+
 /// Dispatches non-blocking desktop notifications when enabled in preferences.
 #[derive(Debug, Clone)]
 pub struct Notifier {
     enabled: bool,
+    recorder: Option<NotificationLog>,
 }
 
 fn clean_text(input: &str) -> String {
@@ -15,7 +21,20 @@ fn clean_text(input: &str) -> String {
 
 impl Notifier {
     pub fn new(enabled: bool) -> Self {
-        Self { enabled }
+        Self {
+            enabled,
+            recorder: None,
+        }
+    }
+
+    /// Create an in-memory recording notifier for deterministic unit/integration tests.
+    pub fn new_recorded(enabled: bool) -> (Self, NotificationLog) {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let notifier = Self {
+            enabled,
+            recorder: Some(Arc::clone(&log)),
+        };
+        (notifier, log)
     }
 
     pub fn set_enabled(&mut self, enabled: bool) {
@@ -24,6 +43,13 @@ impl Notifier {
 
     pub fn is_enabled(&self) -> bool {
         self.enabled
+    }
+
+    pub fn notify_minimized_to_tray(&self) {
+        self.notify_info(
+            "Polban Presensi",
+            "Aplikasi masih berjalan di latar belakang (system tray). Klik ikon di tray untuk membuka kembali atau keluar.",
+        );
     }
 
     pub fn notify_attendance_success(&self, course_name: &str) {
@@ -58,6 +84,12 @@ impl Notifier {
         }
         let summary = summary.to_string();
         let body = body.to_string();
+        if let Some(recorder) = &self.recorder {
+            if let Ok(mut guard) = recorder.lock() {
+                guard.push((summary, body));
+            }
+            return;
+        }
         let _ = std::thread::Builder::new()
             .name("polban-notify".to_string())
             .spawn(move || {

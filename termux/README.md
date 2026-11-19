@@ -1,12 +1,12 @@
-# Polban Auto Absen — Termux (Android)
+# Polban Auto Absen untuk Termux (Android)
 
-Jalankan auto-absen di HP Android **tanpa browser**, hemat baterai, bisa background 24/7 — memakai binary native Rust (`polban-absen`) dengan **live TUI dashboard** yang responsif hingga layar HP sempit (`< 44` kolom).
+Jalankan auto-absen di HP Android tanpa browser, hemat baterai, dan bisa berjalan di latar belakang 24/7 memakai binary native Rust (`polban-absen`) dengan live TUI dashboard yang menyesuaikan hingga layar HP sempit (`< 44` kolom).
 
 ## Prasyarat
 
-- **Termux** — install dari **F-Droid** (bukan Play Store).
-- *(Opsional)* **Termux:Boot** dari F-Droid — untuk auto-jalan saat HP nyala.
-- *(Opsional)* **Termux:API** — untuk `termux-wake-lock` (cegah CPU tidur).
+- **Termux:** install dari **F-Droid** (bukan Play Store).
+- **Termux:Boot** *(opsional)* dari F-Droid untuk auto-jalan saat HP menyala.
+- **Termux:API** *(opsional)* untuk `termux-wake-lock` (mencegah CPU tidur).
 
 ## Instalasi
 
@@ -69,7 +69,7 @@ tail -f absen.log
 | Masalah | Solusi |
 | --- | --- |
 | Binary gagal diunduh | Pastikan koneksi stabil, atau build lokal dengan `pkg install -y rust` lalu `cargo build --release --bin polban-absen` |
-| `ERROR: POLBAN_USERNAME...` | `.env` belum diisi — edit `.env` |
+| `ERROR: POLBAN_USERNAME...` | `.env` belum diisi; edit `.env` terlebih dahulu |
 | `[ERROR] .env tidak ditemukan` | Letakkan `.env` di folder yang sama dengan `termux-run.sh`, atau jalankan `POLBAN_ENV=/path/.env bash termux-run.sh` |
 | `Login GAGAL` (exit 2) | NIM/password salah di `.env` (loop otomatis berhenti agar tidak spam login) |
 | Berhenti saat HP tidur | Install Termux:API lalu jalankan `termux-wake-lock` (otomatis dipanggil oleh `termux-run.sh`) |

@@ -86,10 +86,11 @@ pub fn show(
     update_status: &UpdateStatus,
 ) -> Option<HeaderAction> {
     let mut action = None;
-    let stacked_actions = width < ThemeTokens::BREAKPOINT_HEADER_STACK;
+    let is_active = snapshot.status.is_active();
+    let stacked_actions =
+        width < ThemeTokens::BREAKPOINT_HEADER_STACK || (!is_active && width < 880.0);
     let is_compact = width < ThemeTokens::BREAKPOINT_MEDIUM;
     let has_account = !configured_nim.trim().is_empty();
-    let is_active = snapshot.status.is_active();
     let (tone, st_icon, st_label) = status_visuals(snapshot.status);
 
     egui::Frame::none()
@@ -129,7 +130,7 @@ pub fn show(
             } else {
                 ui.horizontal(|ui| {
                     let avail = ui.available_width();
-                    let actions_reserve = 385.0;
+                    let actions_reserve = if is_active { 385.0 } else { 520.0 };
                     let left_w = (avail - actions_reserve - ThemeTokens::SPACE_MD).max(200.0);
 
                     ui.allocate_ui_with_layout(
@@ -416,7 +417,7 @@ fn render_action_buttons(
             ui,
             palette,
             ButtonTone::Primary,
-            "Mulai Pantau",
+            "Jalankan Presensi Otomatis",
             Some(icons::draw_play),
             has_account,
             0.0,
@@ -520,7 +521,7 @@ fn render_action_buttons_rtl(
             ui,
             palette,
             ButtonTone::Primary,
-            "Mulai Pantau",
+            "Jalankan Presensi Otomatis",
             Some(icons::draw_play),
             has_account,
             0.0,

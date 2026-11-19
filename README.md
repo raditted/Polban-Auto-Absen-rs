@@ -1,117 +1,51 @@
-# Polban Auto Absen (v3.0 — Rust)
+# Polban Presensi
 
-Auto-login + auto-klik tombol absen **biru** di `akademik.polban.ac.id/ajar/absen`, dengan log sukses/gagal yang jelas dan live terminal dashboard (`ratatui`). Berjalan **lokal dengan IP asli** sebagai satu binary mandiri tanpa runtime eksternal.
+Aplikasi desktop dan terminal untuk login otomatis dan menekan tombol presensi biru di `akademik.polban.ac.id/ajar/absen`. Program berjalan lokal di perangkat Anda tanpa browser eksternal dan tanpa mengirim kredensial ke pihak ketiga.
+
+Oleh [raditted](https://github.com/raditted), berdasarkan proyek asli oleh Haikal. Lihat [LICENSE](LICENSE).
+
+## Cara Mencari dan Mengunduh
+
+1. Buka halaman rilis terbaru di [GitHub Releases](https://github.com/raditted/Polban-Auto-Absen-rs/releases/latest), atau klik **Releases** di sisi kanan halaman utama repository ini.
+2. Gulir ke bagian **Assets** di bagian bawah catatan rilis.
+3. Unduh file sesuai sistem operasi Anda:
+   - Windows (disarankan): `Polban-Presensi-Setup-Windows-x64.exe` (Installer)
+   - Windows (portable): `Polban-Presensi-Portable-Windows-x64.zip` (ekstrak, lalu klik 2x `Polban Presensi.exe`)
+   - macOS: `Polban-Presensi-macOS-AppleSilicon.zip` (Mac M1/M2/M3/M4) atau `Polban-Presensi-macOS-Intel.zip` (Mac Intel)
+   - Linux: `Polban-Presensi-Linux-x64.tar.gz`
+
+## Cara Menginstall dan Menjalankan (Desktop GUI)
+
+### 1. Pasang aplikasi
+
+- **Windows (Installer):** klik 2x `Polban-Presensi-Setup-Windows-x64.exe` lalu ikuti langkah instalasi hingga selesai. Jika muncul jendela biru Windows SmartScreen (*Windows protected your PC*), klik **More info**, lalu klik **Run anyway**.
+- **Windows (Portable):** ekstrak `Polban-Presensi-Portable-Windows-x64.zip` ke folder pilihan Anda, lalu klik 2x `Polban Presensi.exe`.
+- **macOS:** ekstrak file `.zip` sesuai arsitektur Mac Anda, lalu pindahkan `Polban Presensi.app` ke folder `Applications`.
+- **Linux:** ekstrak `Polban-Presensi-Linux-x64.tar.gz`, lalu jalankan binary `polban-absen-gui`.
+
+### 2. Isi akun akademik
+
+1. Buka menu **Pengaturan** (atau ikuti kartu masuk pada layar awal).
+2. Masukkan NIM dan kata sandi portal akademik Polban Anda, lalu simpan.
+3. Kredensial disimpan lokal di penyimpanan aman sistem operasi (Windows Credential Manager, macOS Keychain, atau Linux Secret Service) dan tidak pernah disimpan di dalam file `.exe`.
+
+### 3. Jalankan dan kelola aplikasi
+
+- Klik **Jalankan Presensi Otomatis** di bagian atas untuk mulai memantau jadwal dan menekan tombol presensi biru secara otomatis.
+- Jika Anda menekan tombol tutup (`X`), jendela disembunyikan ke system tray dan notifikasi desktop akan memberi tahu bahwa aplikasi masih berjalan di latar belakang. Klik ikon di system tray untuk membuka jendela kembali, atau klik kanan lalu pilih **Keluar** untuk menutup aplikasi sepenuhnya.
+- Saat versi baru tersedia, tombol **Update** akan muncul di bilah atas tanpa mengganggu pemakaian. Klik tombol tersebut untuk mengunduh pembaruan di latar belakang, lalu klik **Restart untuk Update** ketika verifikasi selesai.
+
+Shortcut keyboard di aplikasi desktop: `Ctrl+,` (Pengaturan), `Escape` (tutup Pengaturan), `Ctrl+R` (Mulai atau Hentikan pemantauan), `F5` (Cek Sekarang), `Ctrl+Q` (Keluar penuh).
 
 ---
 
-**Rust v3.0 oleh [raditted](https://github.com/raditted)** — berdasarkan proyek asli oleh **Haikal**. Lihat [LICENSE](LICENSE).
+## Mode Terminal (CLI / TUI) dan Platform Lain
 
-## Struktur Repository
+Bagian di bawah ditujukan untuk pengguna yang ingin menjalankan versi terminal (`polban-absen`), Termux di Android, ekstensi Chrome, atau membangun sendiri dari kode sumber.
 
-```
-polban-auto-absen/
-├── Cargo.toml                  # Workspace Rust v3.0
-├── rust-toolchain.toml         # Channel stable + fmt/clippy
-├── crates/
-│   ├── absen-core/             # Config, state (.clicked.json), parser HTML, HTTP client & engine
-│   ├── absen-cli/              # Binary `polban-absen` + live TUI dashboard (ratatui) + mode plain
-│   └── absen-gui/              # Aplikasi Desktop native `polban-absen-gui` (eframe/egui)
-│
-├── windows/                    # Launcher Windows (.bat -> polban-absen.exe & polban-absen-gui.exe)
-│   ├── install.bat             # Build via Cargo / unduh release binary CLI + GUI + buat .env
-│   ├── polban_presensi_gui.bat # Launcher Desktop GUI tanpa jendela cmd hitam
-│   ├── persiapan.bat           # Cek binary & validasi .env (dipanggil launcher CLI)
-│   ├── auto_absen.bat          # Jalankan mode loop CLI (live dashboard)
-│   ├── absen_sekali.bat        # Tes sekali jalan CLI (--once)
-│   └── .env.example  README.md
-│
-├── linux/                      # Launcher Linux
-│   ├── install.sh              # Unduh release CLI + GUI / build Cargo + opsi shortcut .desktop
-│   ├── run.sh                  # Launcher utama CLI/TUI
-│   ├── run-gui.sh              # Launcher Desktop GUI (`polban-absen-gui`)
-│   └── .env.example  README.md  preview.png
-│
-├── termux/                     # Launcher Android Termux (24/7)
-│   ├── termux-install.sh       # Unduh binary Android / pkg install rust + autostart Termux:Boot
-│   ├── termux-run.sh           # Launcher loop + wake-lock + auto-restart
-│   └── .env.example  README.md
-│
-├── extension/                  # Chrome MV3 (JS, berjalan di browser)
-├── legacy/python/              # Arsip implementasi v2.0 (tidak lagi dipakai launcher)
-└── .github/workflows/          # CI (Linux/Windows/macOS) & Release multi-target
-```
+### Windows (.bat)
 
-## Fitur
-
-- **Satu binary mandiri (`polban-absen`)** — dikompilasi dengan Rust (`reqwest` + `rustls`), tanpa OpenSSL dan tanpa dependensi runtime eksternal.
-- **Auto-login & re-login otomatis** — mengisi NIM + password ke `/laman/login`, lalu memantau `/ajar/absen`. Jika sesi habis di tengah jalan, otomatis login ulang.
-- **Bypass popup "Kuesioner Layanan"** — karena bekerja di level HTTP, dialog JavaScript browser tidak menghalangi absen.
-- **Klik HANYA tombol BIRU** — tombol `btn-primary` / `btn-info` (yang tidak `disabled`) diklik lewat `POST /ajar/absen/absensi_awal`.
-- **Retry sampai terverifikasi** — memeriksa response POST, dan jika ambigu melakukan 1× GET konfirmasi (maks `POLBAN_MAX_RETRY`, default 5).
-- **Anti-duplikat harian** — menyimpan signature di `.clicked.json` dan reset otomatis saat ganti tanggal lokal.
-- **Live TUI Dashboard responsif (`ratatui`)** — panel **Identitas**, tabel **Jadwal Hari Ini** 4 tingkat lebar (`>=100` / `>=56` / `>=44` / `<44` kolom), countdown scan berikutnya, log ring buffer 15 entri, scroll (`↑`/`↓`, `PgUp`/`PgDn`, `Home`/`End`, `j`/`k`/`g`/`G`/spasi/`b`), dan terminal restore guard.
-- **Aplikasi Desktop Polban Presensi (`polban-absen-gui`)**: antarmuka grafis native untuk Windows, macOS, dan Linux dengan onboarding inline, penyimpanan kata sandi aman lewat Keychain/Credential Manager OS (`keyring`), system tray dengan 0% CPU saat tersembunyi, notifikasi desktop native, autostart saat login, impor `.env`, tema Terang/Gelap/Sistem, dan ekspor HTML diagnostik.
-- **Fallback plain otomatis** — otomatis beralih ke output plain text saat `--plain` dipakai atau stdout bukan TTY.
-
-## Cara Pakai
-
-### 1. Pakai Binary Release (tanpa install Rust)
-
-Unduh binary dari halaman **GitHub Releases** sesuai platform (atau jalankan `install.bat` / `install.sh` / `termux-install.sh` di folder platform masing-masing).
-
-### 2. Build Sendiri dari Source
-
-Butuh [Rust toolchain](https://rustup.rs/) (`stable`):
-
-```bash
-# Binary CLI / TUI
-cargo build --release --bin polban-absen
-
-# Binary Desktop GUI
-cargo build --release --bin polban-absen-gui
-```
-
-Binary hasil build ada di `target/release/polban-absen` dan `target/release/polban-absen-gui` (atau `.exe` di Windows).
-
-### Aplikasi Desktop Polban Presensi (`polban-absen-gui`)
-
-Aplikasi desktop **Polban Presensi** tersedia untuk tiga platform:
-- **Windows x64**: unduh `Polban-Presensi-Setup-Windows-x64.exe` (installer, disarankan) atau `Polban-Presensi-Portable-Windows-x64.zip` (portable `Polban Presensi.exe`), atau jalankan `windows\install.bat` lalu klik 2x `windows\polban_presensi_gui.bat`.
-- **macOS (Apple Silicon & Intel)**: unduh `Polban-Presensi-macOS-AppleSilicon.zip` atau `Polban-Presensi-macOS-Intel.zip`, ekstrak `Polban Presensi.app` ke `/Applications`.
-- **Linux x64**: unduh `Polban-Presensi-Linux-x64.tar.gz` (atau jalankan `bash linux/install.sh --desktop` lalu `bash linux/run-gui.sh`). Pada build dari source di Linux, pastikan paket dev GTK3/AppIndicator/X11/OpenGL terpasang (`libgtk-3-dev libayatana-appindicator3-dev libxdo-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libgl1-mesa-dev libdbus-1-dev`).
-
-Opsi baris perintah `polban-absen-gui`:
-- `--minimized`: langsung mulai tersembunyi di system tray (dipakai otomatis oleh fitur autostart).
-- `--help`, `--version`: tampilkan bantuan atau versi aplikasi.
-
-Shortcut keyboard di aplikasi desktop: `Ctrl+,` (Pengaturan), `Escape` (tutup Pengaturan), `Ctrl+R` (Mulai/Hentikan pemantauan), `F5` (Cek Sekarang), `Ctrl+Q` (Keluar penuh).
-
-### Argumen CLI
-
-```bash
-polban-absen [OPSI]
-```
-
-| Argumen | Keterangan |
-|---|---|
-| `--engine http` | Engine HTTP ringan (satu-satunya engine yang didukung di v3.0) |
-| `--once` | Sekali jalan lalu exit (tanpa alternate screen agar dashboard tetap terbaca) |
-| `--plain` | Mode plain text tanpa live dashboard |
-| `--no-alt-screen` | Gambar dashboard di layar biasa (tanpa alternate screen) |
-| `--ascii` | Pakai border ASCII (`+ - |`) untuk terminal lama |
-| `--dump [FILE]` | Login lalu simpan HTML `/ajar/absen` ke `FILE` (default `absen-dump.html`) untuk diagnostik |
-
-> **Catatan migrasi dari v2.0:** Engine `--engine pw` (Playwright) sudah dihapus di versi Rust v3.0. Jika `--engine pw` atau `POLBAN_ENGINE=pw` diberikan, program mencetak pesan penolakan dan keluar dengan kode `1`.
-
-## 🖥️ Extension (Chrome)
-
-1. `chrome://extensions` → **Developer mode** ON → **Load unpacked** → pilih folder `extension/`.
-2. Klik ikon → **⚙️ Pengaturan** → isi NIM & password → **Simpan**.
-3. Klik ikon → **▶ Mulai Absen**.
-
-## 🖥️ Windows `.bat`
-
-Lihat [**`windows/README.md`**](windows/README.md).
+Lihat panduan lengkap di [windows/README.md](windows/README.md).
 
 ```bat
 cd windows
@@ -123,9 +57,9 @@ absen_sekali.bat
 auto_absen.bat
 ```
 
-## 🐧 Linux
+### Linux
 
-Lihat [**`linux/README.md`**](linux/README.md).
+Lihat panduan lengkap di [linux/README.md](linux/README.md).
 
 ```bash
 cd linux
@@ -138,9 +72,9 @@ nano .env
 bash run.sh
 ```
 
-## 📱 Termux (Android)
+### Termux (Android)
 
-Lihat [**`termux/README.md`**](termux/README.md).
+Lihat panduan lengkap di [termux/README.md](termux/README.md).
 
 ```bash
 cd termux
@@ -150,26 +84,80 @@ nano .env
 bash termux-run.sh
 ```
 
-## Cara Membaca Log & Status
+### Ekstensi Chrome
 
-Format baris log: `HH:MM:SS  [TAG] [KODE] pesan`. Tag: `[OK]` sukses · `[!!]` gagal · `[??]` peringatan · `[--]` info · `[>>]` skip.
+1. Buka `chrome://extensions`, aktifkan **Developer mode**, klik **Load unpacked**, lalu pilih folder `extension/`.
+2. Klik ikon ekstensi, buka **Pengaturan**, isi NIM dan kata sandi, lalu klik **Simpan**.
+3. Klik **Mulai Absen**.
+
+### Argumen CLI (`polban-absen`)
+
+```bash
+polban-absen [OPSI]
+```
+
+| Argumen | Keterangan |
+|---|---|
+| `--engine http` | Engine HTTP ringan (satu-satunya engine yang didukung di v3.0) |
+| `--once` | Jalan satu siklus lalu keluar |
+| `--plain` | Mode teks polos tanpa dashboard interaktif |
+| `--no-alt-screen` | Gambar dashboard di layar terminal biasa (tanpa alternate screen) |
+| `--ascii` | Pakai border ASCII (`+ - \|`) untuk terminal lama |
+| `--dump [FILE]` | Login lalu simpan HTML `/ajar/absen` ke `FILE` (default `absen-dump.html`) untuk diagnostik |
+
+Catatan migrasi dari v2.0: engine `--engine pw` (Playwright) sudah dihapus. Jika `--engine pw` atau `POLBAN_ENGINE=pw` diberikan, program mencetak pesan penolakan dan keluar dengan kode `1`.
+
+### Build dari Source
+
+Membutuhkan [Rust toolchain](https://rustup.rs/) (`stable`):
+
+```bash
+# Binary CLI / TUI
+cargo build --release --bin polban-absen
+
+# Binary Desktop GUI
+cargo build --release --bin polban-absen-gui
+```
+
+Hasil build tersimpan di `target/release/polban-absen` dan `target/release/polban-absen-gui` (dengan ekstensi `.exe` di Windows). Untuk build GUI dari source di Linux, pastikan paket development GTK3, AppIndicator, X11, dan OpenGL sudah terpasang (`libgtk-3-dev libayatana-appindicator3-dev libxdo-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libgl1-mesa-dev libdbus-1-dev`).
+
+## Cara Kerja dan Status Jadwal
+
+Program melakukan login ke `/laman/login`, memantau halaman `/ajar/absen`, dan hanya menekan tombol biru (`btn-primary` atau `btn-info` yang aktif) lewat `POST /ajar/absen/absensi_awal`. Karena bekerja langsung di level HTTP, popup JavaScript seperti kuesioner layanan tidak menghalangi proses presensi. Jika sesi habis di tengah jalan, program login ulang otomatis dan menyimpan riwayat harian di `.clicked.json` agar tidak mengirim klik ganda.
+
+Format baris log: `HH:MM:SS  [TAG] [KODE] pesan`. Tag: `[OK]` sukses, `[!!]` gagal, `[??]` peringatan, `[--]` info, `[>>]` dilewati.
 
 | Status Tabel | Warna | Arti |
 |---|---|---|
 | `SUDAH ABSEN` | Hijau | Absensi sudah tercatat |
-| `SIAP ABSEN` | Biru | Bisa diabsen sekarang — akan diklik otomatis |
+| `SIAP ABSEN` | Biru | Bisa diabsen sekarang dan akan diklik otomatis |
 | `BELUM BUKA` | Oranye/Kuning | Dosen belum membuka sesi absen |
 | `BELUM WAKTUNYA` | Merah | Di luar jam absensi |
 
-### Kode Exit
+Kode exit CLI: `0` selesai normal atau dihentikan pengguna (`Ctrl+C` atau `q`), `1` konfigurasi `.env` kosong/tidak valid atau error runtime, `2` login gagal karena NIM atau kata sandi salah.
 
-- `0`: selesai normal / dihentikan user (`Ctrl+C` atau `q`).
-- `1`: konfigurasi `.env` kosong/tidak valid, argumen salah (termasuk `--engine pw`), atau error runtime.
-- `2`: login gagal (NIM/password salah).
+## Struktur Repository
+
+```text
+polban-auto-absen/
+├── Cargo.toml                  # Workspace Rust
+├── rust-toolchain.toml         # Channel stable + fmt/clippy
+├── assets/                     # Ikon aplikasi (.ico dan .png)
+├── crates/
+│   ├── absen-core/             # Config, state (.clicked.json), parser HTML, HTTP client & engine
+│   ├── absen-cli/              # Binary polban-absen + live TUI dashboard (ratatui) + mode plain
+│   └── absen-gui/              # Aplikasi Desktop native polban-absen-gui (eframe/egui)
+├── windows/                    # Installer Inno Setup (.iss), launcher .bat, dan README Windows
+├── linux/                      # Installer & launcher Linux
+├── termux/                     # Installer & launcher Android Termux
+├── extension/                  # Ekstensi Chrome MV3
+├── legacy/python/              # Arsip implementasi v2.0 (tidak lagi dipakai launcher)
+└── .github/workflows/          # CI (Linux/Windows/macOS) & GitHub Release multi-platform
+```
 
 ## Keamanan
 
-- Kredensial disimpan **lokal** (Keychain/Credential Manager/Secret Service OS untuk Desktop GUI; `chrome.storage` untuk extension; `.env` untuk CLI). Tidak pernah dikirim selain ke host target yang dikonfigurasi.
-- `prefs.json` pada Desktop GUI tidak pernah menyimpan kata sandi; hanya NIM dan preferensi tampilan/jadwal yang disimpan di direktori konfigurasi OS.
-- `.env`, `.clicked.json`, dan `*-dump.html` sudah ada di `.gitignore`.
-- Password pada struct konfigurasi di-redact (`[REDACTED]`) pada output `Debug` dan tidak pernah ditulis ke log.
+- Kredensial disimpan lokal (Credential Manager, Keychain, atau Secret Service untuk Desktop GUI; `chrome.storage` untuk ekstensi; `.env` untuk CLI) dan hanya dikirim ke host target yang dikonfigurasi.
+- File `prefs.json` pada Desktop GUI tidak menyimpan kata sandi, hanya NIM dan preferensi tampilan/jadwal.
+- File `.env`, `.clicked.json`, dan `*-dump.html` sudah dikecualikan di `.gitignore`.
+- Kata sandi pada struct konfigurasi disensor (`[REDACTED]`) pada output `Debug` dan tidak pernah ditulis ke log.

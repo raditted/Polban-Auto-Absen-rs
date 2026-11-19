@@ -1,4 +1,4 @@
-# Polban Auto Absen — Linux (Terminal TUI)
+# Polban Auto Absen untuk Linux (Terminal TUI)
 
 Auto-login + auto-klik tombol absen **biru** di `akademik.polban.ac.id/ajar/absen` menggunakan binary native Rust (`polban-absen`) dengan **live terminal dashboard** (`ratatui`).
 

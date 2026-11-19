@@ -284,7 +284,7 @@ fn show_empty_state(
             let message = if has_scanned {
                 "Tidak ada jadwal perkuliahan terdaftar untuk hari ini di portal akademik."
             } else {
-                "Pemantauan belum dijalankan. Tekan Mulai Pantau untuk memuat jadwal perkuliahan hari ini."
+                "Pemantauan belum dijalankan. Tekan Jalankan Presensi Otomatis untuk memuat jadwal perkuliahan hari ini."
             };
             ui.label(
                 RichText::new(message)
@@ -311,7 +311,7 @@ fn show_empty_state(
                 ui,
                 palette,
                 ButtonTone::Primary,
-                "Mulai Pantau",
+                "Jalankan Presensi Otomatis",
                 Some(icons::draw_play),
                 true,
                 0.0,
