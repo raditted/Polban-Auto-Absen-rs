@@ -43,7 +43,9 @@ struct AppCore {
     diag_pick_rx: Option<mpsc::Receiver<(absen_core::Config, Option<PathBuf>)>>,
     external_show_flag: Option<Arc<AtomicBool>>,
     release_instance_lock: Option<Arc<dyn Fn() + Send + Sync>>,
+    #[cfg(target_os = "windows")]
     native_hwnd: isize,
+    #[cfg(target_os = "windows")]
     win32_msg_hwnd: isize,
 }
 
@@ -887,8 +889,6 @@ impl DesktopApp {
 
         #[cfg(target_os = "windows")]
         let native_hwnd = win32::extract_hwnd(cc).unwrap_or(0);
-        #[cfg(not(target_os = "windows"))]
-        let native_hwnd = 0;
 
         let core = Rc::new(RefCell::new(AppCore {
             prefs,
@@ -911,7 +911,9 @@ impl DesktopApp {
             diag_pick_rx: None,
             external_show_flag: None,
             release_instance_lock: None,
+            #[cfg(target_os = "windows")]
             native_hwnd,
+            #[cfg(target_os = "windows")]
             win32_msg_hwnd: 0,
         }));
 
@@ -943,12 +945,13 @@ impl DesktopApp {
 
         #[cfg(target_os = "windows")]
         let win32_msg_hwnd = msg_window.as_ref().map_or(0, |w| w.hwnd());
-        #[cfg(not(target_os = "windows"))]
-        let win32_msg_hwnd = 0;
 
         {
             let mut c = core.borrow_mut();
-            c.win32_msg_hwnd = win32_msg_hwnd;
+            #[cfg(target_os = "windows")]
+            {
+                c.win32_msg_hwnd = win32_msg_hwnd;
+            }
 
             let waker_ctx = cc.egui_ctx.clone();
             if let Some(t) = &mut c.tray {
@@ -1037,7 +1040,9 @@ impl DesktopApp {
             diag_pick_rx: None,
             external_show_flag: None,
             release_instance_lock: None,
+            #[cfg(target_os = "windows")]
             native_hwnd: 0,
+            #[cfg(target_os = "windows")]
             win32_msg_hwnd: 0,
         }));
 
