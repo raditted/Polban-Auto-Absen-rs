@@ -20,7 +20,7 @@ checksum = "366ffbaa4442f4684d91e2cd7c5ea7c4ed8add41959a31447066e279e432b618"
 
 [[package]]
 name = "absen-cli"
-version = "3.0.1"
+version = "3.1.0"
 dependencies = [
  "absen-core",
  "anyhow",
@@ -36,7 +36,7 @@ dependencies = [
 
 [[package]]
 name = "absen-core"
-version = "3.0.1"
+version = "3.1.0"
 dependencies = [
  "chrono",
  "httpmock",
@@ -50,7 +50,7 @@ dependencies = [
 
 [[package]]
 name = "absen-gui"
-version = "3.0.1"
+version = "3.1.0"
 dependencies = [
  "absen-core",
  "auto-launch",
