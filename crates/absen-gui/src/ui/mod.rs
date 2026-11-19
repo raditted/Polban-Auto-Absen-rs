@@ -437,8 +437,8 @@ pub fn switch_row(
             Vec2::new(switch_w, switch_h),
         );
 
-        let max_text_w = (switch_rect.left() - ThemeTokens::SPACE_MD - (rect.left() + left_pad))
-            .max(60.0);
+        let max_text_w =
+            (switch_rect.left() - ThemeTokens::SPACE_MD - (rect.left() + left_pad)).max(60.0);
         let label_galley = ui.painter().layout(
             label.to_string(),
             egui::FontId::new(13.0, FontFamily::Proportional),

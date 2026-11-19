@@ -11,9 +11,10 @@ use crate::credentials::CredentialBackend;
 use crate::prefs::{AppPrefs, DarkThemePreset, LightThemePreset, ThemePreference};
 use crate::theme::{AppearanceConfig, Palette, ThemeTokens};
 use crate::ui::{
-    action_button, hairline_divider, icons, labeled_text_input, paint_focus_ring,
+    action_button, hairline_divider, icons, labeled_text_input, mono_text, paint_focus_ring,
     segmented_control, semibold_text, status_badge, switch_row, ButtonTone, SemanticTone,
 };
+use crate::updater::{UpdateStatus, CURRENT_VERSION};
 
 /// Editable settings and onboarding form state; `Debug` redacts the password buffer.
 #[derive(Clone, Default)]
@@ -173,6 +174,9 @@ pub enum SettingsAction {
     ImportDotenv,
     ExportDiagnosticHtml,
     PreviewTheme(AppearanceConfig),
+    CheckForUpdates,
+    StartUpdate,
+    RestartToUpdate,
 }
 
 /// User action returned by the inline first-run onboarding card.
@@ -343,12 +347,7 @@ fn draw_chevron_down(painter: &egui::Painter, rect: Rect, color: Color32) {
     painter.add(egui::Shape::line(vec![p0, p1, p2], stroke));
 }
 
-fn render_color_token_row(
-    ui: &mut egui::Ui,
-    palette: &Palette,
-    label: &str,
-    token_color: Color32,
-) {
+fn render_color_token_row(ui: &mut egui::Ui, palette: &Palette, label: &str, token_color: Color32) {
     let row_w = ui.available_width();
     let row_h = 34.0;
     let (rect, _) = ui.allocate_exact_size(Vec2::new(row_w, row_h), Sense::hover());
@@ -472,10 +471,7 @@ fn render_preset_dropdown_row<T: Copy + PartialEq>(
         );
 
         let (pill_fill, pill_stroke) = if is_open || trigger_resp.hovered() {
-            (
-                palette.bg_subtle,
-                Stroke::new(1.2_f32, palette.accent_text),
-            )
+            (palette.bg_subtle, Stroke::new(1.2_f32, palette.accent_text))
         } else {
             (
                 palette.bg_surface,
@@ -519,8 +515,10 @@ fn render_preset_dropdown_row<T: Copy + PartialEq>(
         let item_h = 28.0;
         let menu_w = 184.0_f32.min((screen.width() - 24.0).max(140.0));
         let menu_h = (all_presets.len() as f32) * item_h + 8.0;
-        let menu_x = (pill_rect.right() - menu_w)
-            .clamp(screen.left() + 8.0, (screen.right() - menu_w - 8.0).max(8.0));
+        let menu_x = (pill_rect.right() - menu_w).clamp(
+            screen.left() + 8.0,
+            (screen.right() - menu_w - 8.0).max(8.0),
+        );
         let preferred_y = if pill_rect.bottom() + 4.0 + menu_h <= screen.bottom() - 8.0 {
             pill_rect.bottom() + 4.0
         } else if pill_rect.top() - 4.0 - menu_h >= screen.top() + 8.0 {
@@ -553,10 +551,8 @@ fn render_preset_dropdown_row<T: Copy + PartialEq>(
                         ui.spacing_mut().item_spacing.y = 0.0;
                         for &preset in all_presets {
                             let is_selected = preset == *current;
-                            let (item_rect, item_resp) = ui.allocate_exact_size(
-                                Vec2::new(inner_w, item_h),
-                                Sense::click(),
-                            );
+                            let (item_rect, item_resp) =
+                                ui.allocate_exact_size(Vec2::new(inner_w, item_h), Sense::click());
                             let item_resp = item_resp.on_hover_cursor(CursorIcon::PointingHand);
                             if item_resp.clicked() {
                                 *current = preset;
@@ -579,9 +575,7 @@ fn render_preset_dropdown_row<T: Copy + PartialEq>(
                                 let font_id = if is_selected {
                                     egui::FontId::new(
                                         12.5,
-                                        FontFamily::Name(
-                                            ThemeTokens::FONT_SEMIBOLD_FAMILY.into(),
-                                        ),
+                                        FontFamily::Name(ThemeTokens::FONT_SEMIBOLD_FAMILY.into()),
                                     )
                                 } else {
                                     egui::FontId::new(12.5, FontFamily::Proportional)
@@ -747,6 +741,9 @@ pub fn show(
     state: &mut SettingsState,
     backend: CredentialBackend,
     palette: &Palette,
+    update_status: &UpdateStatus,
+    checking_update: bool,
+    update_note: Option<&(String, bool)>,
 ) -> Option<SettingsAction> {
     if !state.open {
         return None;
@@ -1197,6 +1194,142 @@ pub fn show(
                                     .clicked()
                                     {
                                         action = Some(SettingsAction::ExportDiagnosticHtml);
+                                    }
+
+                                    ui.add_space(ThemeTokens::SPACE_LG);
+                                    hairline_divider(ui, palette.border_subtle);
+                                    ui.add_space(ThemeTokens::SPACE_MD);
+
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.spacing_mut().item_spacing = Vec2::new(
+                                            ThemeTokens::SPACE_SM,
+                                            ThemeTokens::SPACE_XS,
+                                        );
+                                        ui.label(semibold_text(
+                                            "Versi Aplikasi",
+                                            13.0,
+                                            palette.text_primary,
+                                        ));
+                                        ui.label(mono_text(
+                                            format!("v{CURRENT_VERSION}"),
+                                            12.5,
+                                            palette.accent_text,
+                                        ));
+                                    });
+                                    ui.add_space(ThemeTokens::SPACE_SM);
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.spacing_mut().item_spacing = Vec2::splat(ThemeTokens::SPACE_SM);
+                                        let is_downloading = matches!(
+                                            update_status,
+                                            UpdateStatus::Downloading { .. }
+                                        );
+                                        let check_label = if checking_update {
+                                            "Memeriksa..."
+                                        } else {
+                                            "Cek Pembaruan"
+                                        };
+                                        if action_button(
+                                            ui,
+                                            palette,
+                                            ButtonTone::Secondary,
+                                            check_label,
+                                            Some(icons::draw_refresh),
+                                            !checking_update && !is_downloading,
+                                            0.0,
+                                        )
+                                        .clicked()
+                                        {
+                                            action = Some(SettingsAction::CheckForUpdates);
+                                        }
+
+                                        match update_status {
+                                            UpdateStatus::Available(candidate) => {
+                                                let lbl = format!("Update v{}", candidate.version);
+                                                if action_button(
+                                                    ui,
+                                                    palette,
+                                                    ButtonTone::Primary,
+                                                    &lbl,
+                                                    Some(icons::draw_download),
+                                                    true,
+                                                    0.0,
+                                                )
+                                                .clicked()
+                                                {
+                                                    action = Some(SettingsAction::StartUpdate);
+                                                }
+                                            }
+                                            UpdateStatus::Downloading {
+                                                progress_pct,
+                                                verifying,
+                                                ..
+                                            } => {
+                                                let lbl = if *verifying {
+                                                    "Memverifikasi...".to_string()
+                                                } else if let Some(pct) = progress_pct {
+                                                    format!("Mengunduh {pct}%")
+                                                } else {
+                                                    "Mengunduh...".to_string()
+                                                };
+                                                action_button(
+                                                    ui,
+                                                    palette,
+                                                    ButtonTone::Secondary,
+                                                    &lbl,
+                                                    Some(icons::draw_download),
+                                                    false,
+                                                    0.0,
+                                                );
+                                            }
+                                            UpdateStatus::ReadyToRestart { .. } => {
+                                                if action_button(
+                                                    ui,
+                                                    palette,
+                                                    ButtonTone::Primary,
+                                                    "Restart untuk Update",
+                                                    Some(icons::draw_refresh),
+                                                    true,
+                                                    0.0,
+                                                )
+                                                .clicked()
+                                                {
+                                                    action = Some(SettingsAction::RestartToUpdate);
+                                                }
+                                            }
+                                            UpdateStatus::Failed {
+                                                retry_candidate: Some(_),
+                                                ..
+                                            } if action_button(
+                                                ui,
+                                                palette,
+                                                ButtonTone::Danger,
+                                                "Coba Lagi Update",
+                                                Some(icons::draw_alert),
+                                                true,
+                                                0.0,
+                                            )
+                                            .clicked() =>
+                                            {
+                                                action = Some(SettingsAction::StartUpdate);
+                                            }
+                                            _ => {}
+                                        }
+                                    });
+
+                                    if let Some((note_text, note_err)) = update_note {
+                                        ui.add_space(ThemeTokens::SPACE_XS);
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(note_text)
+                                                    .size(12.0)
+                                                    .color(if *note_err {
+                                                        palette.red_text
+                                                    } else {
+                                                        palette.text_secondary
+                                                    }),
+                                            )
+                                            .wrap(),
+                                        );
                                     }
 
                                     if state.status_message.is_some() {

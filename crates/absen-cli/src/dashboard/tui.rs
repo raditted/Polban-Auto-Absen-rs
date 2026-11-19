@@ -807,10 +807,7 @@ fn blit_buffer(src: &Buffer, dst: &mut Buffer, dst_x: u16, dst_y: u16, src_y: us
     if dst_x < dst.area.left() || dst_x >= dst.area.right() {
         return;
     }
-    let max_x = src
-        .area
-        .width
-        .min(dst.area.right().saturating_sub(dst_x));
+    let max_x = src.area.width.min(dst.area.right().saturating_sub(dst_x));
     for dy in 0..rows {
         let sy = src_y + dy;
         let Some(ty) = dst_y.checked_add(dy as u16) else {
@@ -1394,8 +1391,14 @@ mod tests {
         };
 
         let top_text = extract(&buf);
-        assert!(top_text.contains("Budi Santoso"), "inline origin failed:\n{top_text}");
-        assert!(top_text.contains("Jadwal Hari Ini"), "inline origin failed:\n{top_text}");
+        assert!(
+            top_text.contains("Budi Santoso"),
+            "inline origin failed:\n{top_text}"
+        );
+        assert!(
+            top_text.contains("Jadwal Hari Ini"),
+            "inline origin failed:\n{top_text}"
+        );
 
         view.apply_scroll(ScrollAction::End);
         let mut buf2 = Buffer::empty(area);

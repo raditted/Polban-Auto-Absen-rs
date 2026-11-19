@@ -757,8 +757,14 @@ mod tests {
 
     #[test]
     fn truncate_str_respects_utf8_boundaries() {
-        assert_eq!(truncate_str("Pemrograman — Lanjut 🚀", 15), "Pemrograman — L");
-        assert_eq!(truncate_str("Pendidikan Pancasila", 100), "Pendidikan Pancasila");
+        assert_eq!(
+            truncate_str("Pemrograman — Lanjut 🚀", 15),
+            "Pemrograman — L"
+        );
+        assert_eq!(
+            truncate_str("Pendidikan Pancasila", 100),
+            "Pendidikan Pancasila"
+        );
         assert_eq!(truncate_str("ééé", 2), "éé");
     }
 }

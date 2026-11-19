@@ -414,22 +414,13 @@ fn render_course_card(ui: &mut egui::Ui, course: &CourseItem, palette: &Palette)
                     if !time_display.is_empty() {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 5.0;
-                            icons::paint_icon(
-                                ui,
-                                13.0,
-                                palette.text_secondary,
-                                icons::draw_clock,
-                            );
+                            icons::paint_icon(ui, 13.0, palette.text_secondary, icons::draw_clock);
                             ui.label(mono_text(&time_display, 12.0, palette.text_primary));
                         });
                     }
                     if let Some(note_text) = &note {
                         if !time_display.is_empty() {
-                            ui.label(
-                                RichText::new("·")
-                                    .size(12.0)
-                                    .color(palette.text_secondary),
-                            );
+                            ui.label(RichText::new("·").size(12.0).color(palette.text_secondary));
                         }
                         ui.label(
                             RichText::new(sanitize_dash(note_text).into_owned())

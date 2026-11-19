@@ -97,7 +97,7 @@ else
   if [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; then
     TMP_DIR="$(mktemp -d)"
     ARCHIVE="$TMP_DIR/polban-absen-gui.tar.gz"
-    GUI_URL="https://github.com/${REPO}/releases/latest/download/polban-absen-gui-x86_64-unknown-linux-gnu.tar.gz"
+    GUI_URL="https://github.com/${REPO}/releases/latest/download/Polban-Presensi-Linux-x64.tar.gz"
     if download_file "$GUI_URL" "$ARCHIVE" && tar -xzf "$ARCHIVE" -C "$TMP_DIR"; then
       EXTRACTED_BIN="$(find "$TMP_DIR" -type f -name "polban-absen-gui" | head -n 1 || true)"
       if [ -n "$EXTRACTED_BIN" ]; then

@@ -5,6 +5,9 @@ use absen_gui::bridge::{ActivityItem, ActivityKind, CourseItem, EngineStatus, Gu
 use absen_gui::credentials::MemoryFallbackStore;
 use absen_gui::prefs::{AppPrefs, DarkThemePreset, LightThemePreset, ThemePreference};
 use absen_gui::theme::Palette;
+use absen_gui::updater::{
+    AssetStrategy, RestartPlan, UpdateCandidate, UpdateStatus, CURRENT_VERSION,
+};
 use absen_gui::DesktopApp;
 use egui::{Event, Key, Modifiers, PointerButton, Pos2, RawInput, Rect, Shape, Vec2};
 
@@ -238,14 +241,29 @@ fn populated_schedule_renders_without_overlap_across_responsive_viewports() {
             let text_rects = collect_text_rects(&out);
             let text = collect_rendered_text(&out);
 
-            assert!(text.contains("Jadwal Kuliah Hari Ini"), "{name} missing Jadwal");
+            assert!(
+                text.contains("Jadwal Kuliah Hari Ini"),
+                "{name} missing Jadwal"
+            );
             if expects_activity_visible {
-                assert!(text.contains("Riwayat Aktivitas"), "{name} missing Activity");
+                assert!(
+                    text.contains("Riwayat Aktivitas"),
+                    "{name} missing Activity"
+                );
             }
-            assert!(text.contains("Portal Terhubung"), "{name} missing clean portal status");
-            assert!(text.contains("Cek berikutnya"), "{name} missing next-check metric");
+            assert!(
+                text.contains("Portal Terhubung"),
+                "{name} missing clean portal status"
+            );
+            assert!(
+                text.contains("Cek berikutnya"),
+                "{name} missing next-check metric"
+            );
             assert!(text.contains("16 dtk"), "{name} missing countdown unit dtk");
-            assert!(!text.contains("OK: Authenticated"), "{name} leaked raw auth string");
+            assert!(
+                !text.contains("OK: Authenticated"),
+                "{name} leaked raw auth string"
+            );
             assert!(!text.contains("60d"), "{name} leaked inconsistent 60d unit");
             assert!(
                 text.contains("07:00 \u{2013} 08:40") && text.contains("08:40 \u{2013} 12:20"),
@@ -418,7 +436,10 @@ fn settings_modal_layout_alignment_backdrop_and_dismiss_across_viewports() {
                     && (r.height() - size.y).abs() < 2.0
                     && fill.a() > 100
             });
-            assert!(has_scrim, "{size:?} ({theme:?}): expected dimmed backdrop scrim");
+            assert!(
+                has_scrim,
+                "{size:?} ({theme:?}): expected dimmed backdrop scrim"
+            );
 
             // Verify modal container is inset from viewport edges (never touching top/bottom).
             let expected_fill = match theme {
@@ -749,4 +770,152 @@ fn all_19_light_and_dark_theme_presets_render_without_overflow_across_viewports(
             assert_eq!(ctx.style().visuals.window_fill, expected.bg_surface);
         }
     }
+}
+
+#[test]
+fn header_update_pill_renders_all_states_without_overflow_or_overlap() {
+    let viewports = [
+        ("narrow_680", Vec2::new(680.0, 540.0)),
+        ("medium_960", Vec2::new(960.0, 640.0)),
+        ("desktop_1280", Vec2::new(1280.0, 800.0)),
+    ];
+
+    let sample_candidate = UpdateCandidate {
+        version: "3.0.2".to_string(),
+        release_url: "https://github.com/raditted/Polban-Auto-Absen-rs/releases/tag/v3.0.2"
+            .to_string(),
+        strategy: AssetStrategy::WindowsPortableZip,
+        asset: None,
+        sha256sums_url: None,
+    };
+
+    for (vp_name, size) in viewports {
+        let ctx = egui::Context::default();
+        let mut app = DesktopApp::new_headless(
+            &ctx,
+            configured_prefs(ThemePreference::Light),
+            Box::new(MemoryFallbackStore::new()),
+        );
+        app.set_test_snapshot(Some(sample_populated_snapshot()));
+
+        // Idle, Checking, UpToDate must render zero header update clutter.
+        for hidden_status in [
+            UpdateStatus::Idle,
+            UpdateStatus::Checking,
+            UpdateStatus::UpToDate,
+        ] {
+            app.set_update_status_for_test(hidden_status);
+            let out = run_frames(&ctx, &mut app, size, Vec::new());
+            assert_no_horizontal_overflow(&out, size.x, vp_name);
+            let text = collect_rendered_text(&out);
+            assert!(!text.contains("Update v"));
+            assert!(!text.contains("Mengunduh"));
+            assert!(!text.contains("Restart untuk Update"));
+            assert!(!text.contains("Gagal Update"));
+        }
+
+        // Available -> Update v3.0.2
+        app.set_update_status_for_test(UpdateStatus::Available(sample_candidate.clone()));
+        let avail_out = run_frames(&ctx, &mut app, size, Vec::new());
+        assert_no_horizontal_overflow(&avail_out, size.x, vp_name);
+        let avail_rects = collect_text_rects(&avail_out);
+        let pill_rect = find_text_rect(&avail_rects, "Update v3.0.2")
+            .unwrap_or_else(|| panic!("{vp_name} missing Update v3.0.2 pill"));
+        let stop_rect = find_text_rect(&avail_rects, "Hentikan")
+            .unwrap_or_else(|| panic!("{vp_name} missing Hentikan button"));
+        assert!(
+            !pill_rect.intersects(stop_rect),
+            "{vp_name}: update pill {pill_rect:?} overlaps Hentikan {stop_rect:?}"
+        );
+
+        // Downloading 42%
+        app.set_update_status_for_test(UpdateStatus::Downloading {
+            version: "3.0.2".to_string(),
+            progress_pct: Some(42),
+            verifying: false,
+        });
+        let dl_out = run_frames(&ctx, &mut app, size, Vec::new());
+        assert_no_horizontal_overflow(&dl_out, size.x, vp_name);
+        assert!(collect_rendered_text(&dl_out).contains("Mengunduh 42%"));
+
+        // Verifying...
+        app.set_update_status_for_test(UpdateStatus::Downloading {
+            version: "3.0.2".to_string(),
+            progress_pct: Some(100),
+            verifying: true,
+        });
+        let ver_out = run_frames(&ctx, &mut app, size, Vec::new());
+        assert_no_horizontal_overflow(&ver_out, size.x, vp_name);
+        assert!(collect_rendered_text(&ver_out).contains("Memverifikasi..."));
+
+        // ReadyToRestart -> Restart untuk Update
+        app.set_update_status_for_test(UpdateStatus::ReadyToRestart {
+            version: "3.0.2".to_string(),
+            plan: RestartPlan::RunInstaller {
+                installer_path: std::path::PathBuf::from("Polban-Presensi-Setup-Windows-x64.exe"),
+            },
+        });
+        let ready_out = run_frames(&ctx, &mut app, size, Vec::new());
+        assert_no_horizontal_overflow(&ready_out, size.x, vp_name);
+        let ready_rects = collect_text_rects(&ready_out);
+        let restart_rect = find_text_rect(&ready_rects, "Restart untuk Update")
+            .unwrap_or_else(|| panic!("{vp_name} missing Restart untuk Update pill"));
+        let ready_stop_rect = find_text_rect(&ready_rects, "Hentikan")
+            .unwrap_or_else(|| panic!("{vp_name} missing Hentikan button"));
+        assert!(
+            !restart_rect.intersects(ready_stop_rect),
+            "{vp_name}: restart pill {restart_rect:?} overlaps Hentikan {ready_stop_rect:?}"
+        );
+
+        // Failed -> Gagal Update - Coba Lagi
+        app.set_update_status_for_test(UpdateStatus::Failed {
+            message: "Checksum tidak cocok".to_string(),
+            retry_candidate: Some(sample_candidate.clone()),
+        });
+        let fail_out = run_frames(&ctx, &mut app, size, Vec::new());
+        assert_no_horizontal_overflow(&fail_out, size.x, vp_name);
+        assert!(collect_rendered_text(&fail_out).contains("Gagal Update - Coba Lagi"));
+    }
+}
+
+#[test]
+fn settings_modal_displays_current_version_and_manual_update_check() {
+    let ctx = egui::Context::default();
+    let mut app = DesktopApp::new_headless(
+        &ctx,
+        configured_prefs(ThemePreference::Light),
+        Box::new(MemoryFallbackStore::new()),
+    );
+    app.set_test_snapshot(Some(sample_populated_snapshot()));
+    let size = Vec2::new(960.0, 680.0);
+    let screen_center = Pos2::new(size.x * 0.5, size.y * 0.5);
+
+    let main_out = run_frames(&ctx, &mut app, size, Vec::new());
+    let settings_btn = find_text_rect(&collect_text_rects(&main_out), "Pengaturan")
+        .expect("expected Pengaturan button");
+    let _ = run_frames(&ctx, &mut app, size, click_at(settings_btn.center()));
+    assert!(app.is_settings_open());
+
+    // Scroll to the bottom of the settings ScrollArea where version and update check live.
+    let mut scrolled_out = run_frames(&ctx, &mut app, size, Vec::new());
+    for _ in 0..4 {
+        scrolled_out = run_frames(
+            &ctx,
+            &mut app,
+            size,
+            vec![
+                Event::PointerMoved(screen_center),
+                Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: Vec2::new(0.0, -2000.0),
+                    modifiers: Modifiers::NONE,
+                },
+            ],
+        );
+    }
+    assert_no_horizontal_overflow(&scrolled_out, size.x, "settings_update_section");
+
+    let text = collect_rendered_text(&scrolled_out);
+    assert!(text.contains(&format!("v{CURRENT_VERSION}")));
+    assert!(text.contains("Cek Pembaruan"));
 }

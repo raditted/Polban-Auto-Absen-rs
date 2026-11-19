@@ -62,7 +62,9 @@ impl Notifier {
             .name("polban-notify".to_string())
             .spawn(move || {
                 let mut note = notify_rust::Notification::new();
-                note.appname("Polban Presensi").summary(&summary).body(&body);
+                note.appname("Polban Presensi")
+                    .summary(&summary)
+                    .body(&body);
                 let _ = note.show();
             });
     }

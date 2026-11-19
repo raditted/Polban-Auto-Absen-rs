@@ -22,7 +22,9 @@ fn base_icon() -> &'static RgbaImage {
     BASE_ICON_RGBA.get_or_init(|| {
         image::load_from_memory_with_format(APP_ICON_PNG, ImageFormat::Png)
             .map(|img| img.to_rgba8())
-            .unwrap_or_else(|_| RgbaImage::from_pixel(64, 64, image::Rgba([0xFF, 0xFF, 0xFF, 0xFF])))
+            .unwrap_or_else(|_| {
+                RgbaImage::from_pixel(64, 64, image::Rgba([0xFF, 0xFF, 0xFF, 0xFF]))
+            })
     })
 }
 

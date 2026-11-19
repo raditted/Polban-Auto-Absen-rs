@@ -1,14 +1,17 @@
 //! Header bar showing student identity, live engine status, scannable metrics, and primary actions.
 
 use absen_core::Color;
-use egui::{Align, Layout, Pos2, RichText, Sense, Vec2};
+use egui::{
+    Align, CursorIcon, FontFamily, Layout, Pos2, Rect, RichText, Rounding, Sense, Stroke, Vec2,
+};
 
 use crate::bridge::{EngineStatus, GuiSnapshot};
 use crate::theme::{Palette, ThemeTokens};
 use crate::ui::{
-    action_button, hairline_divider, icons, mono_text, semibold_text, status_badge, ButtonTone,
-    SemanticTone,
+    action_button, hairline_divider, icons, mono_text, paint_focus_ring, semibold_text,
+    status_badge, ButtonTone, SemanticTone,
 };
+use crate::updater::UpdateStatus;
 
 /// Actions emitted by the header bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,6 +21,8 @@ pub enum HeaderAction {
     ScanNow,
     OpenSettings,
     CycleTheme,
+    StartUpdate,
+    RestartToUpdate,
 }
 
 fn status_visuals(
@@ -38,7 +43,10 @@ fn status_visuals(
     }
 }
 
-fn portal_connection_label(status: EngineStatus, palette: &Palette) -> (egui::Color32, &'static str) {
+fn portal_connection_label(
+    status: EngineStatus,
+    palette: &Palette,
+) -> (egui::Color32, &'static str) {
     match status {
         EngineStatus::Monitoring | EngineStatus::ScanningNow => {
             (palette.emerald_border, "Portal Terhubung")
@@ -75,6 +83,7 @@ pub fn show(
     is_dark: bool,
     palette: &Palette,
     width: f32,
+    update_status: &UpdateStatus,
 ) -> Option<HeaderAction> {
     let mut action = None;
     let stacked_actions = width < ThemeTokens::BREAKPOINT_HEADER_STACK;
@@ -96,7 +105,15 @@ pub fn show(
             ui.set_width(ui.available_width());
 
             if stacked_actions {
-                show_identity_block(ui, snapshot, configured_nim, palette, (tone, st_icon, st_label));
+                show_identity_block(
+                    ui,
+                    snapshot,
+                    configured_nim,
+                    palette,
+                    (tone, st_icon, st_label),
+                    update_status,
+                    &mut action,
+                );
                 ui.add_space(ThemeTokens::SPACE_MD);
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = Vec2::splat(ThemeTokens::SPACE_SM);
@@ -126,6 +143,8 @@ pub fn show(
                                 configured_nim,
                                 palette,
                                 (tone, st_icon, st_label),
+                                update_status,
+                                &mut action,
                             );
                         },
                     );
@@ -159,17 +178,16 @@ fn show_identity_block(
     snapshot: &GuiSnapshot,
     configured_nim: &str,
     palette: &Palette,
-    status_info: (
-        SemanticTone,
-        fn(&egui::Painter, egui::Rect, egui::Color32),
-        &str,
-    ),
+    status_info: (SemanticTone, fn(&egui::Painter, Rect, egui::Color32), &str),
+    update_status: &UpdateStatus,
+    action: &mut Option<HeaderAction>,
 ) {
     let (tone, st_icon, st_label) = status_info;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = Vec2::new(ThemeTokens::SPACE_SM, ThemeTokens::SPACE_XS);
         ui.label(semibold_text("Polban Presensi", 18.0, palette.text_primary));
         status_badge(ui, palette, tone, st_icon, st_label);
+        render_update_pill(ui, palette, update_status, action);
     });
     ui.add_space(3.0);
     ui.add(
@@ -180,6 +198,162 @@ fn show_identity_block(
         )
         .wrap(),
     );
+}
+
+fn update_pill_button(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    tone: SemanticTone,
+    icon_fn: fn(&egui::Painter, Rect, egui::Color32),
+    label: &str,
+    interactive: bool,
+    tooltip: &str,
+) -> bool {
+    let (fg, bg, border) = tone.colors(palette);
+    let galley = ui.painter().layout_no_wrap(
+        label.to_string(),
+        egui::FontId::new(
+            11.5,
+            FontFamily::Name(ThemeTokens::FONT_SEMIBOLD_FAMILY.into()),
+        ),
+        fg,
+    );
+    let pad_x = ThemeTokens::SPACE_SM;
+    let pad_y = 4.0;
+    let icon_w = 12.0;
+    let gap = 5.0;
+    let desired = Vec2::new(
+        pad_x * 2.0 + icon_w + gap + galley.size().x,
+        galley.size().y.max(icon_w) + pad_y * 2.0,
+    );
+    let sense = if interactive {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, mut resp) = ui.allocate_exact_size(desired, sense);
+    if interactive {
+        resp = resp.on_hover_cursor(CursorIcon::PointingHand);
+    }
+    if ui.is_rect_visible(rect) {
+        let hovered = interactive && resp.hovered();
+        let stroke_color = if hovered { fg } else { border };
+        ui.painter().rect(
+            rect,
+            Rounding::same(ThemeTokens::RADIUS_TAG),
+            bg,
+            Stroke::new(if hovered { 1.4_f32 } else { 1.0_f32 }, stroke_color),
+        );
+        let icon_rect = Rect::from_center_size(
+            Pos2::new(rect.left() + pad_x + icon_w * 0.5, rect.center().y),
+            Vec2::splat(icon_w),
+        );
+        icon_fn(ui.painter(), icon_rect, fg);
+        ui.painter().galley(
+            Pos2::new(
+                rect.left() + pad_x + icon_w + gap,
+                rect.center().y - galley.size().y * 0.5,
+            ),
+            galley,
+            fg,
+        );
+        if interactive {
+            paint_focus_ring(ui, &resp, palette, ThemeTokens::RADIUS_TAG);
+        }
+    }
+    let clicked = interactive && resp.clicked();
+    if !tooltip.is_empty() {
+        resp.on_hover_text(tooltip);
+    }
+    clicked
+}
+
+fn render_update_pill(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    update_status: &UpdateStatus,
+    action: &mut Option<HeaderAction>,
+) {
+    match update_status {
+        UpdateStatus::Idle | UpdateStatus::Checking | UpdateStatus::UpToDate => {}
+        UpdateStatus::Available(candidate) => {
+            let label = format!("Update v{}", candidate.version);
+            let tooltip = format!(
+                "Versi v{} tersedia. Klik untuk mengunduh pembaruan di latar belakang.",
+                candidate.version
+            );
+            if update_pill_button(
+                ui,
+                palette,
+                SemanticTone::Blue,
+                icons::draw_download,
+                &label,
+                true,
+                &tooltip,
+            ) {
+                *action = Some(HeaderAction::StartUpdate);
+            }
+        }
+        UpdateStatus::Downloading {
+            version,
+            progress_pct,
+            verifying,
+        } => {
+            let label = if *verifying {
+                "Memverifikasi...".to_string()
+            } else if let Some(pct) = progress_pct {
+                format!("Mengunduh {pct}%")
+            } else {
+                "Mengunduh...".to_string()
+            };
+            let tooltip = format!(
+                "Mengunduh pembaruan v{version} di latar belakang. Aplikasi tetap dapat digunakan."
+            );
+            update_pill_button(
+                ui,
+                palette,
+                SemanticTone::Blue,
+                icons::draw_download,
+                &label,
+                false,
+                &tooltip,
+            );
+        }
+        UpdateStatus::ReadyToRestart { version, .. } => {
+            let tooltip = format!(
+                "Pembaruan v{version} selesai diverifikasi. Klik untuk restart dan menerapkan update."
+            );
+            if update_pill_button(
+                ui,
+                palette,
+                SemanticTone::Emerald,
+                icons::draw_refresh,
+                "Restart untuk Update",
+                true,
+                &tooltip,
+            ) {
+                *action = Some(HeaderAction::RestartToUpdate);
+            }
+        }
+        UpdateStatus::Failed {
+            message,
+            retry_candidate,
+        } => {
+            let interactive = retry_candidate.is_some();
+            if update_pill_button(
+                ui,
+                palette,
+                SemanticTone::Red,
+                icons::draw_alert,
+                "Gagal Update - Coba Lagi",
+                interactive,
+                message,
+            ) && interactive
+            {
+                *action = Some(HeaderAction::StartUpdate);
+            }
+        }
+    }
 }
 
 fn render_theme_button(
@@ -452,11 +626,7 @@ fn show_status_metric_strip(
                         .size(12.0)
                         .color(palette.text_secondary),
                 );
-                ui.label(mono_text(
-                    &snapshot.last_scan,
-                    12.0,
-                    palette.text_primary,
-                ));
+                ui.label(mono_text(&snapshot.last_scan, 12.0, palette.text_primary));
             });
         }
 

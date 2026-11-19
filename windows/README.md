@@ -21,7 +21,7 @@ Dashboard digambar di **alternate screen buffer** (seperti `htop`), jadi layar b
 
 ## Aplikasi Desktop (Polban Presensi GUI)
 
-1. Jalankan `install.bat` sekali untuk menyiapkan `polban-absen-gui.exe` (build lokal via Cargo atau unduh release `polban-absen-gui-x86_64-pc-windows-msvc.exe`).
+1. Jalankan `install.bat` sekali untuk menyiapkan `polban-absen-gui.exe` (build lokal via Cargo atau unduh paket portable `Polban-Presensi-Portable-Windows-x64.zip`). Alternatifnya, unduh `Polban-Presensi-Setup-Windows-x64.exe` dari halaman GitHub Releases untuk installer Windows dengan shortcut Start Menu & Desktop.
 2. Klik 2x `polban_presensi_gui.bat` (atau langsung klik 2x `polban-absen-gui.exe`).
 3. Masukkan NIM dan kata sandi langsung di layar onboarding (disimpan aman di Windows Credential Manager) atau klik **Impor dari .env**.
 4. Jendela dapat disembunyikan ke system tray, mendukung notifikasi Windows, autostart saat login (`--minimized`), serta ekspor HTML diagnostik dari menu Pengaturan.

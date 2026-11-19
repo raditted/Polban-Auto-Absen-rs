@@ -128,24 +128,34 @@ jobs:
             os: windows-latest
             kind: windows
             packages: ""
-            asset: polban-absen-gui-x86_64-pc-windows-msvc.exe
+            asset: Polban-Presensi-Portable-Windows-x64.zip
           - target: aarch64-apple-darwin
             os: macos-latest
             kind: macos
             packages: ""
-            asset: Polban-Presensi-macos-aarch64.zip
+            asset: Polban-Presensi-macOS-AppleSilicon.zip
           - target: x86_64-apple-darwin
             os: macos-latest
             kind: macos
             packages: ""
-            asset: Polban-Presensi-macos-x86_64.zip
+            asset: Polban-Presensi-macOS-Intel.zip
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             kind: linux
             packages: "libgtk-3-dev libayatana-appindicator3-dev libxdo-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libgl1-mesa-dev libdbus-1-dev"
-            asset: polban-absen-gui-x86_64-unknown-linux-gnu.tar.gz
+            asset: Polban-Presensi-Linux-x64.tar.gz
     steps:
       - uses: actions/checkout@v4
+
+      - name: Resolve APP_VERSION
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF:-}" == refs/tags/v* ]]; then
+            APP_VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            APP_VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          fi
+          echo "APP_VERSION=${APP_VERSION:-3.0.1}" >> "$GITHUB_ENV"
 
       - name: Install Linux GUI dependencies
         if: matrix.packages != ''
@@ -164,14 +174,42 @@ jobs:
       - name: Build GUI release binary
         run: cargo build --release --bin polban-absen-gui --target ${{ matrix.target }}
 
-      - name: Package GUI asset
+      - name: Package Windows GUI (Portable ZIP + Inno Setup Installer)
+        if: matrix.kind == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist, stage_win | Out-Null
+          Copy-Item -Force "target\${{ matrix.target }}\release\polban-absen-gui.exe" "stage_win\Polban Presensi.exe"
+          Compress-Archive -Path "stage_win\Polban Presensi.exe" -DestinationPath "dist\${{ matrix.asset }}" -Force
+          Remove-Item -Recurse -Force stage_win
+
+          $iscc = $null
+          $cmd = Get-Command iscc -ErrorAction SilentlyContinue
+          if ($cmd) {
+            $iscc = $cmd.Source
+          } elseif (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe") {
+            $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          } elseif (Test-Path "C:\Program Files\Inno Setup 6\ISCC.exe") {
+            $iscc = "C:\Program Files\Inno Setup 6\ISCC.exe"
+          } else {
+            choco install innosetup -y --no-progress
+            $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          }
+
+          & $iscc `
+            "/DAppVersion=$env:APP_VERSION" `
+            "/DBinaryPath=..\target\${{ matrix.target }}\release\polban-absen-gui.exe" `
+            "/DIconPath=..\assets\app-icon.ico" `
+            "/DOutputDir=..\dist" `
+            "windows\installer.iss"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Package macOS / Linux GUI asset
+        if: matrix.kind != 'windows'
         shell: bash
         run: |
           mkdir -p dist
           case "${{ matrix.kind }}" in
-            windows)
-              cp "target/${{ matrix.target }}/release/polban-absen-gui.exe" "dist/${{ matrix.asset }}"
-              ;;
             macos)
               APP_DIR="dist/Polban Presensi.app"
               mkdir -p "${APP_DIR}/Contents/MacOS"
@@ -184,7 +222,7 @@ jobs:
               done
               iconutil -c icns icon.iconset -o "${APP_DIR}/Contents/Resources/app-icon.icns"
               rm -rf icon.iconset
-              cat > "${APP_DIR}/Contents/Info.plist" <<'PLIST'
+              cat > "${APP_DIR}/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
@@ -196,9 +234,9 @@ jobs:
             <key>CFBundleIdentifier</key>
             <string>id.polban.presensi</string>
             <key>CFBundleVersion</key>
-            <string>3.0.0</string>
+            <string>${APP_VERSION}</string>
             <key>CFBundleShortVersionString</key>
-            <string>3.0.0</string>
+            <string>${APP_VERSION}</string>
             <key>CFBundleIconFile</key>
             <string>app-icon</string>
             <key>CFBundleExecutable</key>
@@ -213,6 +251,7 @@ jobs:
           </plist>
           PLIST
               ditto -c -k --keepParent "${APP_DIR}" "dist/${{ matrix.asset }}"
+              rm -rf "${APP_DIR}"
               ;;
             linux)
               STAGE_DIR="$(mktemp -d)"
@@ -235,11 +274,11 @@ jobs:
               ;;
           esac
 
-      - name: Upload GUI artifact
+      - name: Upload GUI artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset }}
-          path: dist/${{ matrix.asset }}
+          name: gui-${{ matrix.target }}
+          path: dist/*
 
   release:
     name: Publish GitHub Release
@@ -252,14 +291,42 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Generate SHA256SUMS
+      - name: Generate SHA256SUMS and Release Notes
         shell: bash
         run: |
-          cd artifacts
-          sha256sum polban-absen-* Polban-Presensi-* > SHA256SUMS.txt
+          shopt -s nullglob
+          (
+            cd artifacts
+            FILES=(Polban-Presensi-* polban-absen-*)
+            sha256sum "${FILES[@]}" > SHA256SUMS.txt
+          )
+
+          cat > release_notes.md <<'NOTES'
+          ## Unduh Aplikasi Desktop (Polban Presensi)
+
+          | Platform | File | Keterangan |
+          | --- | --- | --- |
+          | **Windows (x64)** | `Polban-Presensi-Setup-Windows-x64.exe` | **Disarankan** — Installer Windows (Start Menu & opsi shortcut Desktop, tanpa perlu Admin) |
+          | **Windows (x64) Portable** | `Polban-Presensi-Portable-Windows-x64.zip` | Ekstrak & jalankan langsung `Polban Presensi.exe` |
+          | **macOS (Apple Silicon)** | `Polban-Presensi-macOS-AppleSilicon.zip` | Ekstrak `Polban Presensi.app` ke `/Applications` |
+          | **macOS (Intel)** | `Polban-Presensi-macOS-Intel.zip` | Ekstrak `Polban Presensi.app` ke `/Applications` |
+          | **Linux (x64)** | `Polban-Presensi-Linux-x64.tar.gz` | Binary `polban-absen-gui`, ikon, dan file `.desktop` |
+
+          <details>
+          <summary>Binary Terminal CLI / TUI & Termux (<code>polban-absen-*</code>) + Checksum</summary>
+
+          - **Windows CLI/TUI**: `polban-absen-x86_64-pc-windows-msvc.exe`
+          - **Linux x64 / ARM64 (static musl)**: `polban-absen-x86_64-unknown-linux-musl`, `polban-absen-aarch64-unknown-linux-musl`
+          - **Android Termux (ARM64 / ARMv7)**: `polban-absen-aarch64-linux-android`, `polban-absen-armv7-linux-androideabi`
+          - **macOS (Intel / Apple Silicon)**: `polban-absen-x86_64-apple-darwin`, `polban-absen-aarch64-apple-darwin`
+          - **Verifikasi Checksum**: `SHA256SUMS.txt`
+
+          </details>
+          NOTES
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*
+          body_path: release_notes.md
           generate_release_notes: true

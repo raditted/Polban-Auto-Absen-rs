@@ -8,5 +8,6 @@ pub mod platform;
 pub mod prefs;
 pub mod theme;
 pub mod ui;
+pub mod updater;
 
 pub use app::DesktopApp;

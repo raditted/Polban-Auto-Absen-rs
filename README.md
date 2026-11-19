@@ -75,10 +75,10 @@ Binary hasil build ada di `target/release/polban-absen` dan `target/release/polb
 
 ### Aplikasi Desktop Polban Presensi (`polban-absen-gui`)
 
-Aplikasi desktop tersedia untuk tiga platform:
-- **Windows x64**: unduh `polban-absen-gui-x86_64-pc-windows-msvc.exe` (atau jalankan `windows\install.bat` lalu klik 2x `windows\polban_presensi_gui.bat`).
-- **macOS (Apple Silicon & Intel)**: unduh `Polban-Presensi-macos-aarch64.zip` atau `Polban-Presensi-macos-x86_64.zip`, ekstrak `Polban Presensi.app` ke `/Applications`.
-- **Linux x64**: unduh `polban-absen-gui-x86_64-unknown-linux-gnu.tar.gz` (atau jalankan `bash linux/install.sh --desktop` lalu `bash linux/run-gui.sh`). Pada build dari source di Linux, pastikan paket dev GTK3/AppIndicator/X11/OpenGL terpasang (`libgtk-3-dev libayatana-appindicator3-dev libxdo-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libgl1-mesa-dev libdbus-1-dev`).
+Aplikasi desktop **Polban Presensi** tersedia untuk tiga platform:
+- **Windows x64**: unduh `Polban-Presensi-Setup-Windows-x64.exe` (installer, disarankan) atau `Polban-Presensi-Portable-Windows-x64.zip` (portable `Polban Presensi.exe`), atau jalankan `windows\install.bat` lalu klik 2x `windows\polban_presensi_gui.bat`.
+- **macOS (Apple Silicon & Intel)**: unduh `Polban-Presensi-macOS-AppleSilicon.zip` atau `Polban-Presensi-macOS-Intel.zip`, ekstrak `Polban Presensi.app` ke `/Applications`.
+- **Linux x64**: unduh `Polban-Presensi-Linux-x64.tar.gz` (atau jalankan `bash linux/install.sh --desktop` lalu `bash linux/run-gui.sh`). Pada build dari source di Linux, pastikan paket dev GTK3/AppIndicator/X11/OpenGL terpasang (`libgtk-3-dev libayatana-appindicator3-dev libxdo-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libgl1-mesa-dev libdbus-1-dev`).
 
 Opsi baris perintah `polban-absen-gui`:
 - `--minimized`: langsung mulai tersembunyi di system tray (dipakai otomatis oleh fitur autostart).

@@ -11,7 +11,7 @@ set "GUI_OUT=%~dp0polban-absen-gui.exe"
 set "REPO=%POLBAN_RELEASE_REPO%"
 if not defined REPO set "REPO=raditted/Polban-Auto-Absen-rs"
 set "CLI_DL_URL=https://github.com/%REPO%/releases/latest/download/polban-absen-x86_64-pc-windows-msvc.exe"
-set "GUI_DL_URL=https://github.com/%REPO%/releases/latest/download/polban-absen-gui-x86_64-pc-windows-msvc.exe"
+set "GUI_DL_URL=https://github.com/%REPO%/releases/latest/download/Polban-Presensi-Portable-Windows-x64.zip"
 
 echo [1/3] Menyiapkan binary CLI polban-absen.exe...
 if exist "%CLI_OUT%" (
@@ -78,10 +78,22 @@ if exist "%~dp0..\Cargo.toml" (
   )
 )
 
-echo       Mengunduh release binary GUI dari %GUI_DL_URL% ...
-powershell -NoProfile -Command "Invoke-WebRequest -Uri '%GUI_DL_URL%' -OutFile '%GUI_OUT%'"
-if errorlevel 1 (
-  if exist "%GUI_OUT%" del "%GUI_OUT%" >nul 2>&1
+echo       Mengunduh paket portable GUI dari %GUI_DL_URL% ...
+set "GUI_ZIP=%~dp0.polban-gui.zip"
+set "GUI_TMP=%~dp0.polban-gui-tmp"
+if exist "%GUI_ZIP%" del /Q "%GUI_ZIP%" >nul 2>&1
+if exist "%GUI_TMP%" rmdir /S /Q "%GUI_TMP%" >nul 2>&1
+powershell -NoProfile -Command "Invoke-WebRequest -Uri '%GUI_DL_URL%' -OutFile '%GUI_ZIP%'; Expand-Archive -Path '%GUI_ZIP%' -DestinationPath '%GUI_TMP%' -Force"
+if not errorlevel 1 (
+  if exist "%GUI_TMP%\Polban Presensi.exe" (
+    copy /Y "%GUI_TMP%\Polban Presensi.exe" "%GUI_OUT%" >nul
+  ) else if exist "%GUI_TMP%\polban-absen-gui.exe" (
+    copy /Y "%GUI_TMP%\polban-absen-gui.exe" "%GUI_OUT%" >nul
+  )
+)
+if exist "%GUI_ZIP%" del /Q "%GUI_ZIP%" >nul 2>&1
+if exist "%GUI_TMP%" rmdir /S /Q "%GUI_TMP%" >nul 2>&1
+if not exist "%GUI_OUT%" (
   echo.
   echo [ERROR] Gagal menyiapkan polban-absen-gui.exe.
   echo         Pastikan terhubung internet, atau pasang Rust lalu jalankan:

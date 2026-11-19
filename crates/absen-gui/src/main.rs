@@ -23,14 +23,24 @@ struct SingleInstanceHandle {
     win32_msg_hwnd: Arc<AtomicIsize>,
     show_flag: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
+    thread_handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SingleInstanceHandle {
+    fn release(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
+        if let Some(addr) = self.local_addr.take() {
+            let _ = TcpStream::connect_timeout(&addr, Duration::from_millis(150));
+        }
+        if let Some(handle) = self.thread_handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 impl Drop for SingleInstanceHandle {
     fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Release);
-        if let Some(addr) = self.local_addr {
-            let _ = TcpStream::connect_timeout(&addr, Duration::from_millis(100));
-        }
+        self.release();
     }
 }
 
@@ -48,7 +58,7 @@ fn acquire_single_instance_at(addr: &str) -> SingleInstanceOutcome {
             let thread_flag = Arc::clone(&show_flag);
             let thread_shutdown = Arc::clone(&shutdown);
 
-            if std::thread::Builder::new()
+            let thread_handle = match std::thread::Builder::new()
                 .name("polban-single-instance".to_string())
                 .spawn(move || {
                     for stream in listener.incoming().flatten() {
@@ -81,11 +91,10 @@ fn acquire_single_instance_at(addr: &str) -> SingleInstanceOutcome {
                             }
                         }
                     }
-                })
-                .is_err()
-            {
-                return SingleInstanceOutcome::Unavailable;
-            }
+                }) {
+                Ok(h) => h,
+                Err(_) => return SingleInstanceOutcome::Unavailable,
+            };
 
             SingleInstanceOutcome::Primary(SingleInstanceHandle {
                 local_addr,
@@ -93,6 +102,7 @@ fn acquire_single_instance_at(addr: &str) -> SingleInstanceOutcome {
                 win32_msg_hwnd,
                 show_flag,
                 shutdown,
+                thread_handle: Some(thread_handle),
             })
         }
         Err(err) if err.kind() == ErrorKind::AddrInUse => {
@@ -176,23 +186,38 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
+    absen_gui::updater::cleanup_old_executables();
+
     #[cfg(target_os = "linux")]
     if let Err(err) = gtk::init() {
         eprintln!("Peringatan: gagal menginisialisasi GTK untuk tray: {err}");
     }
 
     let instance_guard = match acquire_single_instance_at(SINGLE_INSTANCE_ADDR) {
-        SingleInstanceOutcome::Primary(handle) => Some(handle),
+        SingleInstanceOutcome::Primary(handle) => Some(Arc::new(Mutex::new(Some(handle)))),
         SingleInstanceOutcome::SecondaryNotified => return Ok(()),
         SingleInstanceOutcome::Unavailable => None,
     };
 
-    let show_bridge = instance_guard.as_ref().map(|h| {
-        (
+    let show_bridge = instance_guard.as_ref().and_then(|shared| {
+        let guard = shared.lock().ok()?;
+        let h = guard.as_ref()?;
+        Some((
             Arc::clone(&h.ui_ctx),
             Arc::clone(&h.win32_msg_hwnd),
             Arc::clone(&h.show_flag),
-        )
+        ))
+    });
+    let release_cb: Option<Arc<dyn Fn() + Send + Sync>> = instance_guard.as_ref().map(|shared| {
+        let shared_clone = Arc::clone(shared);
+        let cb: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if let Ok(mut guard) = shared_clone.lock() {
+                if let Some(mut handle) = guard.take() {
+                    handle.release();
+                }
+            }
+        });
+        cb
     });
 
     let options = eframe::NativeOptions {
@@ -222,6 +247,9 @@ fn main() -> eframe::Result<()> {
                 }
                 let _ = &msg_hwnd_slot;
                 app.set_external_show_flag(flag);
+            }
+            if let Some(cb) = release_cb {
+                app.set_release_instance_lock(cb);
             }
             Ok(Box::new(app))
         }),
@@ -271,5 +299,21 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(primary.show_flag.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn single_instance_release_frees_port_for_restart() {
+        let mut primary = match acquire_single_instance_at("127.0.0.1:0") {
+            SingleInstanceOutcome::Primary(h) => h,
+            _ => panic!("expected primary single-instance lock"),
+        };
+        let addr = primary.local_addr.expect("bound local addr").to_string();
+        primary.release();
+
+        let respawned = acquire_single_instance_at(&addr);
+        assert!(
+            matches!(respawned, SingleInstanceOutcome::Primary(_)),
+            "port must be immediately reusable after release() for self-update restart"
+        );
     }
 }

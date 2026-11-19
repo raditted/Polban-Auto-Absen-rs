@@ -20,6 +20,7 @@ use crate::ui::header::HeaderAction;
 use crate::ui::jadwal::JadwalAction;
 use crate::ui::settings::{OnboardingAction, SettingsAction, SettingsState};
 use crate::ui::{activity, header, jadwal, settings, CompactTab};
+use crate::updater::{UpdateManager, UpdateStatus};
 
 struct AppCore {
     prefs: AppPrefs,
@@ -29,6 +30,7 @@ struct AppCore {
     notifier: Notifier,
     autostart: AutostartManager,
     settings: SettingsState,
+    updater: UpdateManager,
     compact_tab: CompactTab,
     start_minimized: bool,
     minimized_applied: bool,
@@ -39,6 +41,7 @@ struct AppCore {
     import_pick_rx: Option<mpsc::Receiver<Option<Result<DotenvImportResult, PrefsError>>>>,
     diag_pick_rx: Option<mpsc::Receiver<(absen_core::Config, Option<PathBuf>)>>,
     external_show_flag: Option<Arc<AtomicBool>>,
+    release_instance_lock: Option<Arc<dyn Fn() + Send + Sync>>,
     native_hwnd: isize,
     win32_msg_hwnd: isize,
 }
@@ -310,7 +313,10 @@ impl AppCore {
         self.settings = next;
     }
 
-    fn finish_dotenv_import(&mut self, import_result: Option<Result<DotenvImportResult, PrefsError>>) {
+    fn finish_dotenv_import(
+        &mut self,
+        import_result: Option<Result<DotenvImportResult, PrefsError>>,
+    ) {
         let Some(result) = import_result else {
             self.settings.status_message = Some(
                 "Tidak ada file .env yang dipilih atau ditemukan di direktori standar.".to_string(),
@@ -468,7 +474,46 @@ impl AppCore {
         }
     }
 
+    fn handle_restart_to_update(&mut self, ctx: &egui::Context) {
+        let plan = match &self.updater.status {
+            UpdateStatus::ReadyToRestart { plan, .. } => plan.clone(),
+            _ => return,
+        };
+        self.controller.stop();
+        self.persist_prefs();
+        self.tray.take();
+
+        let release_cb = self.release_instance_lock.clone();
+        let release_fn = || {
+            if let Some(cb) = &release_cb {
+                cb();
+            }
+        };
+
+        if self.headless {
+            release_fn();
+            self.quit_requested = true;
+            return;
+        }
+
+        match crate::updater::apply_update_and_restart(&plan, &release_fn) {
+            Ok(()) => {
+                std::process::exit(0);
+            }
+            Err(err) => {
+                self.updater.manual_note = Some((err.clone(), true));
+                self.updater.status = UpdateStatus::Failed {
+                    message: err,
+                    retry_candidate: None,
+                };
+                ctx.request_repaint();
+            }
+        }
+    }
+
     fn poll_background_tasks(&mut self, ctx: &egui::Context) {
+        self.updater.poll();
+
         if let Some(rx) = &self.import_pick_rx {
             match rx.try_recv() {
                 Ok(picked) => {
@@ -652,110 +697,116 @@ impl AppCore {
                 );
                 ui.allocate_rect(avail_rect, egui::Sense::hover());
 
-                ui.allocate_new_ui(
-                    egui::UiBuilder::new().max_rect(container_rect),
-                    |ui| {
-                        ui.set_width(container_w);
-                        let width = container_w;
-                        if let Some(action) = header::show(
-                            ui,
-                            &snapshot,
-                            &self.prefs.nim,
-                            self.prefs.interval,
-                            is_dark,
-                            palette,
-                            width,
-                        ) {
-                            match action {
-                                HeaderAction::StartMonitoring => self.handle_start_monitoring(ctx),
-                                HeaderAction::StopMonitoring => self.controller.stop(),
-                                HeaderAction::ScanNow => {
-                                    let _ = self.controller.scan_now();
-                                }
-                                HeaderAction::OpenSettings => self.open_settings(),
-                                HeaderAction::CycleTheme => self.toggle_theme(ctx),
+                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(container_rect), |ui| {
+                    ui.set_width(container_w);
+                    let width = container_w;
+                    if let Some(action) = header::show(
+                        ui,
+                        &snapshot,
+                        &self.prefs.nim,
+                        self.prefs.interval,
+                        is_dark,
+                        palette,
+                        width,
+                        &self.updater.status,
+                    ) {
+                        match action {
+                            HeaderAction::StartMonitoring => self.handle_start_monitoring(ctx),
+                            HeaderAction::StopMonitoring => self.controller.stop(),
+                            HeaderAction::ScanNow => {
+                                let _ = self.controller.scan_now();
                             }
+                            HeaderAction::OpenSettings => self.open_settings(),
+                            HeaderAction::CycleTheme => self.toggle_theme(ctx),
+                            HeaderAction::StartUpdate => self.updater.start_download(ctx),
+                            HeaderAction::RestartToUpdate => self.handle_restart_to_update(ctx),
                         }
+                    }
 
-                        ui.add_space(ThemeTokens::SPACE_LG);
+                    ui.add_space(ThemeTokens::SPACE_LG);
 
-                        if self.prefs.nim.trim().is_empty() {
-                            let compact = width < ThemeTokens::BREAKPOINT_MEDIUM;
-                            let backend = self.creds.backend();
-                            egui::ScrollArea::vertical()
-                                .id_salt("onboarding_scroll")
-                                .show(ui, |ui| {
-                                    if let Some(onb_action) = settings::show_onboarding(
-                                        ui,
-                                        &mut self.settings,
-                                        backend,
-                                        palette,
-                                        compact,
-                                    ) {
-                                        match onb_action {
-                                            OnboardingAction::SaveAndStart => {
-                                                self.save_onboarding_and_start(ctx);
-                                            }
-                                            OnboardingAction::ImportDotenv => {
-                                                self.handle_import_dotenv(ctx);
-                                            }
+                    if self.prefs.nim.trim().is_empty() {
+                        let compact = width < ThemeTokens::BREAKPOINT_MEDIUM;
+                        let backend = self.creds.backend();
+                        egui::ScrollArea::vertical()
+                            .id_salt("onboarding_scroll")
+                            .show(ui, |ui| {
+                                if let Some(onb_action) = settings::show_onboarding(
+                                    ui,
+                                    &mut self.settings,
+                                    backend,
+                                    palette,
+                                    compact,
+                                ) {
+                                    match onb_action {
+                                        OnboardingAction::SaveAndStart => {
+                                            self.save_onboarding_and_start(ctx);
+                                        }
+                                        OnboardingAction::ImportDotenv => {
+                                            self.handle_import_dotenv(ctx);
                                         }
                                     }
-                                });
-                            return;
-                        }
-
-                        let mut jadwal_action = None;
-                        if width >= ThemeTokens::BREAKPOINT_WIDE {
-                            let gutter = ThemeTokens::SPACE_LG;
-                            let left_w = (width - gutter) * 0.60;
-                            let right_w = (width - gutter - left_w).max(240.0);
-                            let total_rect = ui.available_rect_before_wrap();
-                            let body_h = total_rect.height().max(220.0);
-                            let left_rect = egui::Rect::from_min_size(
-                                total_rect.min,
-                                egui::vec2(left_w, body_h),
-                            );
-                            let right_rect = egui::Rect::from_min_size(
-                                egui::pos2(total_rect.left() + left_w + gutter, total_rect.top()),
-                                egui::vec2(right_w, body_h),
-                            );
-                            ui.allocate_rect(total_rect, egui::Sense::hover());
-                            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(left_rect), |ui| {
-                                jadwal_action = jadwal::show(ui, &snapshot, palette, false, true);
-                            });
-                            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(right_rect), |ui| {
-                                activity::show(ui, &snapshot, palette, false, true);
-                            });
-                        } else {
-                            let compact = width < ThemeTokens::BREAKPOINT_MEDIUM;
-                            egui::ScrollArea::vertical()
-                                .id_salt("stacked_main_scroll")
-                                .show(ui, |ui| {
-                                    jadwal_action =
-                                        jadwal::show(ui, &snapshot, palette, compact, false);
-                                    ui.add_space(ThemeTokens::SPACE_LG);
-                                    activity::show(ui, &snapshot, palette, compact, false);
-                                });
-                        }
-
-                        if let Some(act) = jadwal_action {
-                            match act {
-                                JadwalAction::OpenSettings => self.open_settings(),
-                                JadwalAction::RetryConnection | JadwalAction::StartMonitoring => {
-                                    self.handle_start_monitoring(ctx);
                                 }
-                                JadwalAction::ScanNow => {
-                                    let _ = self.controller.scan_now();
-                                }
+                            });
+                        return;
+                    }
+
+                    let mut jadwal_action = None;
+                    if width >= ThemeTokens::BREAKPOINT_WIDE {
+                        let gutter = ThemeTokens::SPACE_LG;
+                        let left_w = (width - gutter) * 0.60;
+                        let right_w = (width - gutter - left_w).max(240.0);
+                        let total_rect = ui.available_rect_before_wrap();
+                        let body_h = total_rect.height().max(220.0);
+                        let left_rect =
+                            egui::Rect::from_min_size(total_rect.min, egui::vec2(left_w, body_h));
+                        let right_rect = egui::Rect::from_min_size(
+                            egui::pos2(total_rect.left() + left_w + gutter, total_rect.top()),
+                            egui::vec2(right_w, body_h),
+                        );
+                        ui.allocate_rect(total_rect, egui::Sense::hover());
+                        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(left_rect), |ui| {
+                            jadwal_action = jadwal::show(ui, &snapshot, palette, false, true);
+                        });
+                        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(right_rect), |ui| {
+                            activity::show(ui, &snapshot, palette, false, true);
+                        });
+                    } else {
+                        let compact = width < ThemeTokens::BREAKPOINT_MEDIUM;
+                        egui::ScrollArea::vertical()
+                            .id_salt("stacked_main_scroll")
+                            .show(ui, |ui| {
+                                jadwal_action =
+                                    jadwal::show(ui, &snapshot, palette, compact, false);
+                                ui.add_space(ThemeTokens::SPACE_LG);
+                                activity::show(ui, &snapshot, palette, compact, false);
+                            });
+                    }
+
+                    if let Some(act) = jadwal_action {
+                        match act {
+                            JadwalAction::OpenSettings => self.open_settings(),
+                            JadwalAction::RetryConnection | JadwalAction::StartMonitoring => {
+                                self.handle_start_monitoring(ctx);
+                            }
+                            JadwalAction::ScanNow => {
+                                let _ = self.controller.scan_now();
                             }
                         }
-                    },
-                );
+                    }
+                });
             });
 
         let backend = self.creds.backend();
-        if let Some(action) = settings::show(ctx, &mut self.settings, backend, palette) {
+        if let Some(action) = settings::show(
+            ctx,
+            &mut self.settings,
+            backend,
+            palette,
+            &self.updater.status,
+            self.updater.checking_manual,
+            self.updater.manual_note.as_ref(),
+        ) {
             match action {
                 SettingsAction::Close => self.close_settings(ctx),
                 SettingsAction::Save => {
@@ -769,6 +820,15 @@ impl AppCore {
                 }
                 SettingsAction::PreviewTheme(appearance) => {
                     apply_appearance(ctx, appearance);
+                }
+                SettingsAction::CheckForUpdates => {
+                    self.updater.start_manual_check(ctx);
+                }
+                SettingsAction::StartUpdate => {
+                    self.updater.start_download(ctx);
+                }
+                SettingsAction::RestartToUpdate => {
+                    self.handle_restart_to_update(ctx);
                 }
             }
         }
@@ -836,6 +896,7 @@ impl DesktopApp {
             notifier,
             autostart,
             settings,
+            updater: UpdateManager::new(),
             compact_tab: CompactTab::Jadwal,
             start_minimized,
             minimized_applied: false,
@@ -846,6 +907,7 @@ impl DesktopApp {
             import_pick_rx: None,
             diag_pick_rx: None,
             external_show_flag: None,
+            release_instance_lock: None,
             native_hwnd,
             win32_msg_hwnd: 0,
         }));
@@ -909,6 +971,7 @@ impl DesktopApp {
             {
                 c.handle_start_monitoring(&cc.egui_ctx);
             }
+            c.updater.start_silent_check(&cc.egui_ctx);
         }
 
         Self {
@@ -958,6 +1021,7 @@ impl DesktopApp {
             notifier,
             autostart,
             settings,
+            updater: UpdateManager::new(),
             compact_tab: CompactTab::Jadwal,
             start_minimized: false,
             minimized_applied: true,
@@ -968,6 +1032,7 @@ impl DesktopApp {
             import_pick_rx: None,
             diag_pick_rx: None,
             external_show_flag: None,
+            release_instance_lock: None,
             native_hwnd: 0,
             win32_msg_hwnd: 0,
         }));
@@ -988,6 +1053,21 @@ impl DesktopApp {
     /// Attach a cross-process wakeup flag used by the single-instance listener.
     pub fn set_external_show_flag(&mut self, flag: Arc<AtomicBool>) {
         self.core.borrow_mut().external_show_flag = Some(flag);
+    }
+
+    /// Register a callback that synchronously releases the single-instance lock before restart.
+    pub fn set_release_instance_lock(&mut self, cb: Arc<dyn Fn() + Send + Sync>) {
+        self.core.borrow_mut().release_instance_lock = Some(cb);
+    }
+
+    /// Inject a deterministic `UpdateStatus` for headless UI testing.
+    pub fn set_update_status_for_test(&mut self, status: UpdateStatus) {
+        self.core.borrow_mut().updater.status = status;
+    }
+
+    /// Read the current `UpdateStatus` (used in tests).
+    pub fn update_status(&self) -> UpdateStatus {
+        self.core.borrow().updater.status.clone()
     }
 
     /// Inject or clear a deterministic `GuiSnapshot` for headless UI testing.
