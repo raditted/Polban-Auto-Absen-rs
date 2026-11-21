@@ -2,11 +2,17 @@
 
 use std::borrow::Cow;
 
-use egui::{Align, Layout, Pos2, RichText, Rounding, Sense, Stroke, Vec2};
+use egui::{Align, Color32, CursorIcon, Layout, Pos2, RichText, Rounding, Sense, Stroke, Vec2};
 
 use crate::bridge::{ActivityItem, ActivityKind, GuiSnapshot};
 use crate::theme::{Palette, ThemeTokens};
 use crate::ui::{hairline_divider, mono_text, sanitize_dash, semibold_text};
+
+/// User action triggered from the activity timeline panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActivityAction {
+    OpenProof(String),
+}
 
 fn activity_dot_color(kind: ActivityKind, palette: &Palette) -> egui::Color32 {
     match kind {
@@ -60,7 +66,9 @@ pub fn show(
     palette: &Palette,
     compact: bool,
     scrollable: bool,
-) {
+) -> Option<ActivityAction> {
+    let mut action = None;
+
     egui::Frame::none()
         .fill(palette.bg_surface)
         .stroke(Stroke::new(1.0_f32, palette.border_subtle))
@@ -111,20 +119,27 @@ pub fn show(
                     .id_salt("activity_list_scroll")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        render_activity_list(ui, &snapshot.activities, palette);
+                        render_activity_list(ui, snapshot, palette, &mut action);
                     });
             } else {
-                render_activity_list(ui, &snapshot.activities, palette);
+                render_activity_list(ui, snapshot, palette, &mut action);
             }
         });
+
+    action
 }
 
-fn render_activity_list(ui: &mut egui::Ui, items: &[ActivityItem], palette: &Palette) {
+fn render_activity_list(
+    ui: &mut egui::Ui,
+    snapshot: &GuiSnapshot,
+    palette: &Palette,
+    action: &mut Option<ActivityAction>,
+) {
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
-        let total = items.len();
-        for (idx, item) in items.iter().rev().enumerate() {
-            render_activity_row(ui, item, palette);
+        let total = snapshot.activities.len();
+        for (idx, item) in snapshot.activities.iter().rev().enumerate() {
+            render_activity_row(ui, idx, item, snapshot, palette, action);
             if idx + 1 < total {
                 hairline_divider(ui, palette.border_subtle);
             }
@@ -132,13 +147,37 @@ fn render_activity_list(ui: &mut egui::Ui, items: &[ActivityItem], palette: &Pal
     });
 }
 
-fn render_activity_row(ui: &mut egui::Ui, item: &ActivityItem, palette: &Palette) {
+fn render_activity_row(
+    ui: &mut egui::Ui,
+    idx: usize,
+    item: &ActivityItem,
+    snapshot: &GuiSnapshot,
+    palette: &Palette,
+    action: &mut Option<ActivityAction>,
+) {
     let dot_color = activity_dot_color(item.kind, palette);
     let clean_msg = friendly_message(&item.message);
     let category = friendly_code_label(&item.code);
+    let proof_target = (item.kind == ActivityKind::Ok && item.code == "ABSEN")
+        .then_some(item.proof_key.as_deref())
+        .flatten()
+        .filter(|k| snapshot.proof_by_key(k).is_some());
 
-    egui::Frame::none()
-        .inner_margin(egui::Margin::symmetric(0.0, 10.0))
+    let row_id = proof_target.map(|k| ui.make_persistent_id(("activity_proof_row", idx, k)));
+    let is_hovered = row_id
+        .map(|id| ui.ctx().data(|d| d.get_temp::<bool>(id).unwrap_or(false)))
+        .unwrap_or(false);
+    let row_fill = if is_hovered {
+        palette.bg_subtle
+    } else {
+        Color32::TRANSPARENT
+    };
+    let h_margin = if proof_target.is_some() { 4.0 } else { 0.0 };
+
+    let frame_resp = egui::Frame::none()
+        .fill(row_fill)
+        .rounding(Rounding::same(ThemeTokens::RADIUS_CONTROL))
+        .inner_margin(egui::Margin::symmetric(h_margin, 10.0))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             let avail = ui.available_width();
@@ -148,7 +187,7 @@ fn render_activity_row(ui: &mut egui::Ui, item: &ActivityItem, palette: &Palette
                 64.0
             };
             let dot_col_w = 16.0;
-            let body_w = (avail - dot_col_w - time_w - ThemeTokens::SPACE_SM * 2.0).max(120.0);
+            let body_w = (avail - dot_col_w - time_w - ThemeTokens::SPACE_SM * 2.0).max(110.0);
 
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = ThemeTokens::SPACE_SM;
@@ -163,14 +202,33 @@ fn render_activity_row(ui: &mut egui::Ui, item: &ActivityItem, palette: &Palette
                     );
                 }
 
-                // Middle category + wrapped message
+                // Middle category (+ optional Bukti tag) + wrapped message
                 ui.allocate_ui_with_layout(
                     Vec2::new(body_w, 0.0),
                     Layout::top_down(Align::Min),
                     |ui| {
                         ui.set_max_width(body_w);
-                        if let Some(cat) = category {
-                            ui.label(semibold_text(cat, 12.0, palette.text_secondary));
+                        if category.is_some() || proof_target.is_some() {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                if let Some(cat) = category {
+                                    ui.label(semibold_text(cat, 12.0, palette.text_secondary));
+                                }
+                                if proof_target.is_some() {
+                                    egui::Frame::none()
+                                        .fill(palette.emerald_bg)
+                                        .stroke(Stroke::new(1.0_f32, palette.emerald_border))
+                                        .rounding(Rounding::same(ThemeTokens::RADIUS_TAG))
+                                        .inner_margin(egui::Margin::symmetric(6.0, 1.5))
+                                        .show(ui, |ui| {
+                                            ui.label(semibold_text(
+                                                "Bukti",
+                                                11.0,
+                                                palette.emerald_text,
+                                            ));
+                                        });
+                                }
+                            });
                             ui.add_space(2.0);
                         }
                         ui.add(
@@ -191,5 +249,17 @@ fn render_activity_row(ui: &mut egui::Ui, item: &ActivityItem, palette: &Palette
                     });
                 }
             });
-        });
+        })
+        .response;
+
+    if let (Some(key), Some(id)) = (proof_target, row_id) {
+        let click_resp = ui
+            .interact(frame_resp.rect, id, Sense::click())
+            .on_hover_cursor(CursorIcon::PointingHand);
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(id, click_resp.hovered()));
+        if click_resp.clicked() {
+            *action = Some(ActivityAction::OpenProof(key.to_string()));
+        }
+    }
 }

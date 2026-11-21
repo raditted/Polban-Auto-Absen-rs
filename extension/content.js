@@ -70,6 +70,9 @@
 
   const KEY_CLICKED = 'paa_clicked';
   const KEY_STATE   = 'paa_state';
+  const KEY_PROOFS  = 'paa_proofs';
+  const MAX_PROOFS_PER_DAY = 50;
+  const VERIFY_RANK = { 'observed-green': 1, 'row-cleared': 2, 'dom-green': 3 };
 
   async function getClickedSet() {
     const o = await store.localGet(KEY_CLICKED);
@@ -82,6 +85,175 @@
     await store.localSet({ [KEY_CLICKED]: { _d: todayStr(), s } });
   }
   async function alreadyClicked(sig) { return !!(await getClickedSet())[sig]; }
+
+  function fnv1aHex(str) {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+    return (h >>> 0).toString(16).toUpperCase().padStart(8, '0');
+  }
+
+  function makeProofId(dateStr, seed) {
+    const ymd = String(dateStr || todayStr()).replace(/-/g, '').slice(0, 8);
+    return `PRF-${ymd}-${fnv1aHex(dateStr + '|' + seed)}`;
+  }
+
+  function formatHms(ts) {
+    if (!ts) return now();
+    if (/^\d{2}:\d{2}:\d{2}$/.test(ts)) return ts;
+    const d = new Date(ts);
+    if (!isNaN(d.getTime())) return d.toTimeString().slice(0, 8);
+    return String(ts).slice(0, 8);
+  }
+
+  function rowKeyOf(info) {
+    return [
+      String(info && info.nama || '').trim().toLowerCase(),
+      String(info && info.jam || '').trim().toLowerCase(),
+      String(info && info.dosen || '').trim().toLowerCase(),
+    ].join('|');
+  }
+
+  let proofStore = { _d: todayStr(), items: Object.create(null) };
+  const persistedProofSigs = new Set();
+  let proofStoreLoaded = false;
+  let proofWriteQueue = Promise.resolve();
+
+  function pruneProofItems(items) {
+    const entries = Object.entries(items || {});
+    if (entries.length <= MAX_PROOFS_PER_DAY) return items || Object.create(null);
+    entries.sort((a, b) => String((a[1] && a[1].recordedAt) || '').localeCompare(String((b[1] && b[1].recordedAt) || '')));
+    const kept = Object.create(null);
+    for (const [k, v] of entries.slice(entries.length - MAX_PROOFS_PER_DAY)) {
+      kept[k] = v;
+    }
+    return kept;
+  }
+
+  async function initProofStore() {
+    if (proofStoreLoaded && proofStore._d === todayStr()) return;
+    proofStoreLoaded = true;
+    persistedProofSigs.clear();
+    const today = todayStr();
+    try {
+      const o = await store.localGet(KEY_PROOFS);
+      const d = o[KEY_PROOFS];
+      if (d && d._d === today && d.items && typeof d.items === 'object') {
+        const clean = Object.create(null);
+        for (const [k, v] of Object.entries(d.items)) {
+          if (v && typeof v === 'object') {
+            clean[k] = v;
+            persistedProofSigs.add(k);
+          }
+        }
+        proofStore = { _d: today, items: pruneProofItems(clean) };
+      } else {
+        proofStore = { _d: today, items: Object.create(null) };
+        if (d) {
+          await store.localSet({ [KEY_PROOFS]: { _d: today, items: {} } });
+        }
+      }
+    } catch (e) {
+      proofStore = { _d: today, items: Object.create(null) };
+    }
+  }
+
+  function queueProofPersist() {
+    const payload = { _d: proofStore._d, items: Object.assign({}, proofStore.items) };
+    proofWriteQueue = proofWriteQueue
+      .then(() => store.localSet({ [KEY_PROOFS]: payload }))
+      .catch(() => {});
+    return proofWriteQueue;
+  }
+
+  function findProofKeyForRow(sig, info) {
+    if (sig && proofStore.items[sig]) return sig;
+    const rk = rowKeyOf(info);
+    if (!rk || rk === '||') return null;
+    for (const [k, v] of Object.entries(proofStore.items)) {
+      if (v && rowKeyOf(v) === rk) return k;
+    }
+    return null;
+  }
+
+  function upsertProof(record, { persistMode = 'auto' } = {}) {
+    const today = todayStr();
+    if (proofStore._d !== today) {
+      proofStore = { _d: today, items: Object.create(null) };
+      persistedProofSigs.clear();
+    }
+
+    const matchKey = findProofKeyForRow(record.sig, record);
+    const key = matchKey || record.sig;
+    const existing = proofStore.items[key];
+    const newRank = VERIFY_RANK[record.verifiedBy] || 0;
+    const oldRank = existing ? (VERIFY_RANK[existing.verifiedBy] || 0) : 0;
+
+    let changed = false;
+    let next;
+    if (existing) {
+      if (newRank < oldRank) {
+        return { key, record: existing, changed: false };
+      }
+      next = Object.assign({}, existing, {
+        nama: record.nama || existing.nama,
+        dosen: record.dosen || existing.dosen,
+        jam: record.jam || existing.jam,
+        nim: record.nim || existing.nim,
+        studentNama: record.studentNama || existing.studentNama,
+        buttonTextAfter: record.buttonTextAfter || existing.buttonTextAfter,
+        pageUrl: record.pageUrl || existing.pageUrl,
+        verifiedBy: newRank >= oldRank ? record.verifiedBy : existing.verifiedBy,
+        verifiedAt: newRank > oldRank ? (record.verifiedAt || existing.verifiedAt) : (existing.verifiedAt || record.verifiedAt),
+      });
+      changed = (
+        next.verifiedBy !== existing.verifiedBy ||
+        next.verifiedAt !== existing.verifiedAt ||
+        next.buttonTextAfter !== existing.buttonTextAfter ||
+        next.nama !== existing.nama ||
+        next.dosen !== existing.dosen ||
+        next.jam !== existing.jam ||
+        next.nim !== existing.nim ||
+        next.studentNama !== existing.studentNama
+      );
+    } else {
+      const recordedAt = record.recordedAt || new Date().toISOString();
+      next = {
+        proofId: makeProofId(today, key + '|' + recordedAt),
+        sig: key,
+        nama: record.nama || '-',
+        dosen: record.dosen || '-',
+        jam: record.jam || '-',
+        nim: record.nim || cfg.username || '-',
+        studentNama: record.studentNama || '',
+        recordedAt,
+        verifiedAt: record.verifiedAt || recordedAt,
+        verifiedBy: record.verifiedBy,
+        buttonTextAfter: record.buttonTextAfter || '',
+        pageUrl: record.pageUrl || location.href,
+      };
+      changed = true;
+    }
+
+    if (changed) {
+      proofStore.items[key] = next;
+      proofStore.items = pruneProofItems(proofStore.items);
+    }
+
+    const shouldPersist =
+      persistMode === 'always' ? changed
+      : persistMode === 'if-missing' ? (!persistedProofSigs.has(key) && !!proofStore.items[key])
+      : false;
+
+    if (shouldPersist) {
+      persistedProofSigs.add(key);
+      queueProofPersist();
+    }
+
+    return { key, record: proofStore.items[key] || next, changed };
+  }
 
   /* ================= LOG PANEL ================= */
   function injectCss() {
@@ -157,6 +329,24 @@
       .st-orange{color:#d29922;border-color:#9e6a03;background:rgba(210,153,34,.12)}
       .st-red{color:#f85149;border-color:#8c2320;background:rgba(248,81,73,.12)}
       .st-unknown{color:#8b949e;border-color:#30363d;background:#1c2128}
+      .paa-st-wrap{display:flex;flex-direction:column;align-items:flex-start;gap:4px}
+      .paa-proof-btn{background:#21262d;border:1px solid #238636;color:#3fb950;border-radius:5px;
+        padding:1px 7px;font:700 10px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace;
+        cursor:pointer;transition:background .12s,border-color .12s}
+      .paa-proof-btn:hover,.paa-proof-btn.is-active{background:rgba(35,134,54,.24);border-color:#3fb950;color:#fff}
+      /* Bukti Kehadiran drawer (terpisah dari #paa-ident & #paa-jadwal) */
+      #paa-proof-drawer{border-color:#238636}
+      #paa-proof-drawer[hidden]{display:none}
+      .paa-proof-hd{display:flex;align-items:center;justify-content:space-between;gap:8px;
+        padding:6px 9px;border-bottom:1px solid #30363d;background:#131d19}
+      .paa-proof-title{font-size:10.5px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:#3fb950}
+      .paa-proof-actions{display:flex;gap:6px;margin-top:8px}
+      .paa-proof-actions button{background:#21262d;border:1px solid #30363d;color:#e6edf3;
+        border-radius:5px;padding:4px 9px;cursor:pointer;font:700 10.5px/1.3 ui-monospace,SFMono-Regular,Consolas,monospace}
+      .paa-proof-actions button:hover{background:#30363d}
+      .paa-proof-actions .paa-copy-btn{border-color:#238636;color:#3fb950}
+      .paa-proof-actions .paa-copy-btn.copied{background:rgba(35,134,54,.26);border-color:#3fb950;color:#fff}
+      .paa-proof-url{word-break:break-all;color:#58a6ff;font-size:10.5px}
       /* -- Log aktivitas -- */
       #paa-body{max-height:190px;overflow-y:auto;padding:5px 7px}
       #paa-body::-webkit-scrollbar{width:8px}
@@ -204,6 +394,63 @@
   // sig -> 'clicked' | 'failed' : hasil klik, menimpa warna mentah dari DOM.
   const results = Object.create(null);
   let jadwalRows = [];
+  let activeProofSig = null;
+  let lastRenderedProofKey = '';
+  let copyFeedbackUntil = 0;
+  let copyFeedbackTimer = null;
+
+  function verificationLabel(verifiedBy) {
+    return verifiedBy === 'dom-green' ? 'Terverifikasi Portal' : 'Tercatat di Portal';
+  }
+
+  function buttonStatusDescription(p) {
+    if (p.buttonTextAfter) {
+      return p.verifiedBy === 'dom-green'
+        ? `${p.buttonTextAfter} (terkonfirmasi setelah klik)`
+        : p.buttonTextAfter;
+    }
+    if (p.verifiedBy === 'row-cleared') return 'Tombol absen tertutup setelah klik';
+    return 'Tombol hijau pada halaman absen';
+  }
+
+  function formatProofText(p) {
+    const mhs = p.studentNama ? `${p.studentNama} (${p.nim || '-'})` : (p.nim || '-');
+    return [
+      'BUKTI KEHADIRAN PRESENSI POLBAN',
+      `ID Bukti      : ${p.proofId}`,
+      `Verifikasi    : ${verificationLabel(p.verifiedBy)}`,
+      `Mata Kuliah   : ${p.nama || '-'}`,
+      `Dosen         : ${p.dosen || '-'}`,
+      `Jam Kuliah    : ${p.jam || '-'}`,
+      `Mahasiswa     : ${mhs}`,
+      `Waktu Tercatat: ${formatHms(p.recordedAt)}`,
+      `Status Portal : ${buttonStatusDescription(p)}`,
+      `URL Portal    : ${p.pageUrl || cfg.targetUrl}`,
+    ].join('\n');
+  }
+
+  async function copyText(text) {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch (e) {}
+    }
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      return !!ok;
+    } catch (e) {
+      return false;
+    }
+  }
 
   const LEVEL_TAG = { ok: '[OK]', fail: '[!!]', warn: '[??]', info: '[--]' };
   // Hanya EMPAT status, sama persis dengan engine (tui.py). Hasil klik
@@ -244,6 +491,7 @@
       '    <div class="paa-card-b" id="paa-ident"></div></section>' +
       '  <section class="paa-card"><div class="paa-card-t">Jadwal Hari Ini</div>' +
       '    <div id="paa-jadwal"></div></section>' +
+      '  <section class="paa-card" id="paa-proof-drawer" hidden></section>' +
       '  <section class="paa-card"><div class="paa-card-t" id="paa-log-t">Log Aktivitas</div>' +
       '    <div id="paa-body"></div></section>' +
       '</div>' +
@@ -257,8 +505,57 @@
     };
     $('#paa-clear').onclick = () => { $('#paa-body').innerHTML = ''; renderFoot(); };
     $('#paa-scan').onclick = () => { manualScan = true; ui.nextIn = 0; scanAndClick(); };
+
+    // Single event delegation on #paa-jadwal (never bound per row on scan).
+    $('#paa-jadwal').addEventListener('click', (ev) => {
+      const btn = ev.target && ev.target.closest('button[data-proof-sig]');
+      if (!btn) return;
+      const sig = btn.getAttribute('data-proof-sig');
+      if (!sig) return;
+      activeProofSig = (activeProofSig === sig) ? null : sig;
+      copyFeedbackUntil = 0;
+      renderJadwal();
+      renderProofDrawer(true);
+      if (activeProofSig) {
+        const drawer = $('#paa-proof-drawer');
+        if (drawer) drawer.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      }
+    });
+
+    // Single event delegation on #paa-proof-drawer.
+    $('#paa-proof-drawer').addEventListener('click', async (ev) => {
+      const btn = ev.target && ev.target.closest('button[data-action]');
+      if (!btn) return;
+      const act = btn.getAttribute('data-action');
+      if (act === 'close-proof') {
+        activeProofSig = null;
+        copyFeedbackUntil = 0;
+        renderJadwal();
+        renderProofDrawer(true);
+      } else if (act === 'copy-proof') {
+        const proof = activeProofSig && proofStore.items[activeProofSig];
+        if (!proof) return;
+        const ok = await copyText(formatProofText(proof));
+        if (ok) {
+          copyFeedbackUntil = Date.now() + 2000;
+          btn.textContent = 'Tersalin';
+          btn.classList.add('copied');
+          if (copyFeedbackTimer) clearTimeout(copyFeedbackTimer);
+          copyFeedbackTimer = setTimeout(() => {
+            copyFeedbackUntil = 0;
+            const liveBtn = $('#paa-proof-drawer button[data-action="copy-proof"]');
+            if (liveBtn) {
+              liveBtn.textContent = 'Salin Bukti';
+              liveBtn.classList.remove('copied');
+            }
+          }, 2000);
+        }
+      }
+    });
+
     renderIdent();
     renderJadwal();
+    renderProofDrawer(true);
     renderFoot();
     updateHead();
     startTicker();
@@ -309,15 +606,76 @@
                '<th>Mata Kuliah</th><th>Status</th><th>Dosen</th></tr></thead><tbody>';
     jadwalRows.forEach((r, i) => {
       const dsn = r.dosen || '-';
+      const proofKey = r.status === 'green' ? (r.proofKey || findProofKeyForRow(r.sig, r)) : null;
+      const isActive = proofKey && activeProofSig === proofKey;
+      const proofBtnHtml = proofKey
+        ? `<button type="button" class="paa-proof-btn${isActive ? ' is-active' : ''}" data-proof-sig="${esc(proofKey)}">${isActive ? 'Tutup Bukti' : 'Bukti'}</button>`
+        : '';
       html += `<tr><td class="num">${i + 1}</td>` +
               `<td><span class="mk">${esc(r.nama)}</span>` +
               (r.jam ? `<span class="jam">${esc(r.jam)}</span>` : '') +
               `<span class="dsn-inline">${esc(dsn)}</span></td>` +
-              `<td><span class="paa-badge st-${r.status}">` +
-              `${STATUS_LABEL[r.status] || r.status.toUpperCase()}</span></td>` +
+              `<td><div class="paa-st-wrap"><span class="paa-badge st-${r.status}">` +
+              `${STATUS_LABEL[r.status] || r.status.toUpperCase()}</span>${proofBtnHtml}</div></td>` +
               `<td class="dsn">${esc(dsn)}</td></tr>`;
     });
     box.innerHTML = html + '</tbody></table>';
+  }
+
+  function renderProofDrawer(force = false) {
+    const drawer = $('#paa-proof-drawer');
+    if (!drawer) return;
+    const p = activeProofSig ? proofStore.items[activeProofSig] : null;
+    if (!p) {
+      if (!drawer.hidden || force) {
+        drawer.hidden = true;
+        drawer.innerHTML = '';
+        lastRenderedProofKey = '';
+      }
+      return;
+    }
+    const renderKey = [
+      p.sig,
+      p.proofId,
+      p.verifiedBy,
+      p.verifiedAt,
+      p.buttonTextAfter,
+      p.nama,
+      p.dosen,
+      p.jam,
+      p.nim,
+      p.studentNama,
+      p.pageUrl,
+    ].join('|');
+    if (!force && !drawer.hidden && renderKey === lastRenderedProofKey) {
+      return;
+    }
+    lastRenderedProofKey = renderKey;
+    drawer.hidden = false;
+
+    const mhs = p.studentNama ? `${p.studentNama} (${p.nim || '-'})` : (p.nim || '-');
+    const isCopied = copyFeedbackUntil > Date.now();
+    drawer.innerHTML =
+      '<div class="paa-proof-hd">' +
+      '  <span class="paa-proof-title">Bukti Kehadiran</span>' +
+      `  <span class="paa-badge st-green">${esc(verificationLabel(p.verifiedBy))}</span>` +
+      '</div>' +
+      '<div class="paa-card-b">' +
+      '  <dl class="paa-kv">' +
+      `    <dt>ID Bukti</dt><dd><b>${esc(p.proofId)}</b></dd>` +
+      `    <dt>Mata Kuliah</dt><dd><b>${esc(p.nama || '-')}</b></dd>` +
+      `    <dt>Dosen</dt><dd>${esc(p.dosen || '-')}</dd>` +
+      `    <dt>Jam Kuliah</dt><dd>${esc(p.jam || '-')}</dd>` +
+      `    <dt>Mahasiswa</dt><dd>${esc(mhs)}</dd>` +
+      `    <dt>Waktu</dt><dd><b>${esc(formatHms(p.recordedAt))}</b></dd>` +
+      `    <dt>Status</dt><dd>${esc(buttonStatusDescription(p))}</dd>` +
+      `    <dt>Portal</dt><dd class="paa-proof-url">${esc(p.pageUrl || cfg.targetUrl)}</dd>` +
+      '  </dl>' +
+      '  <div class="paa-proof-actions">' +
+      `    <button type="button" class="paa-copy-btn${isCopied ? ' copied' : ''}" data-action="copy-proof">${isCopied ? 'Tersalin' : 'Salin Bukti'}</button>` +
+      '    <button type="button" data-action="close-proof">Tutup</button>' +
+      '  </div>' +
+      '</div>';
   }
 
   function renderFoot() {
@@ -458,26 +816,55 @@
     if (typeof el.click === 'function') el.click();
   }
 
-  // Tunggu tombol (cari ulang by sig) berubah jadi HIJAU, polling tiap 300ms.
-  // Return 'green' | 'gone' | color terakhir setelah timeout.
-  async function waitForGreen(sig, timeoutMs) {
+  function extractRowMeta(btn) {
+    const info = rowInfo(btn);
+    return {
+      nama: info.nama || '-',
+      jam: info.jam || '',
+      dosen: namaDosen(info.dosen),
+      nim: ui.nim || cfg.username || '-',
+      studentNama: ui.nama || '',
+    };
+  }
+
+  function findButtonByRowKey(rk) {
+    if (!rk || rk === '||') return null;
+    for (const b of attendanceButtons()) {
+      const info = rowInfo(b);
+      const bKey = rowKeyOf({ nama: info.nama, jam: info.jam, dosen: namaDosen(info.dosen) });
+      if (bKey === rk) return b;
+    }
+    return null;
+  }
+
+  // Tunggu tombol (cari ulang by sig atau baris yang sama) berubah jadi HIJAU, polling tiap 300ms.
+  // Return { status: 'green' | 'gone' | color, buttonTextAfter }.
+  async function waitForGreen(sig, timeoutMs, rowKey) {
     const t0 = Date.now();
     while (Date.now() - t0 < timeoutMs) {
-      const b = findBySig(sig);
-      if (!b) return 'gone';                 // DOM/halam berubah -> anggap request terkirim
+      const b = findBySig(sig) || findButtonByRowKey(rowKey);
+      if (!b) return { status: 'gone', buttonTextAfter: '' }; // DOM/halaman berubah -> anggap request terkirim
       const c = classify(b);
-      if (c === 'green') return 'green';
+      if (c === 'green') {
+        const txt = (textOf(b).replace(/\s+/g, ' ').trim() || b.value || 'Sudah Absen');
+        return { status: 'green', buttonTextAfter: txt };
+      }
       await sleep(300);
     }
-    const last = findBySig(sig);
-    return last ? classify(last) : 'gone';
+    const last = findBySig(sig) || findButtonByRowKey(rowKey);
+    if (!last) return { status: 'gone', buttonTextAfter: '' };
+    const lastColor = classify(last);
+    const lastTxt = (textOf(last).replace(/\s+/g, ' ').trim() || last.value || '');
+    return { status: lastColor, buttonTextAfter: lastTxt };
   }
 
   // Klik tombol biru, lalu RETRY sampai jadi hijau (maks cfg.maxRetry percobaan).
   async function clickUntilGreen(btn, sig) {
+    const meta = extractRowMeta(btn);
+    const rk = rowKeyOf(meta);
     for (let attempt = 1; attempt <= cfg.maxRetry; attempt++) {
       // Selalu cari ulang elemen segar (DOM bisa re-render antar percobaan)
-      const cur = findBySig(sig) || btn;
+      const cur = findBySig(sig) || findButtonByRowKey(rk) || btn;
       try {
         cur.scrollIntoView({ block: 'center', behavior: 'smooth' });
         await sleep(rnd(cfg.delayMin, cfg.delayMax));
@@ -486,20 +873,50 @@
         plog('fail', 'KLIK', `Gagal klik (percobaan ${attempt}): ${sig.slice(0, 60)} — ${e.message}`);
         continue; // coba lagi
       }
-      const res = await waitForGreen(sig, cfg.retryWaitMs);
-      if (res === 'green') {
+      const res = await waitForGreen(sig, cfg.retryWaitMs, rk);
+      if (res.status === 'green') {
+        const nowIso = new Date().toISOString();
+        const up = upsertProof({
+          sig,
+          nama: meta.nama,
+          dosen: meta.dosen,
+          jam: meta.jam,
+          nim: meta.nim,
+          studentNama: meta.studentNama,
+          recordedAt: nowIso,
+          verifiedAt: nowIso,
+          verifiedBy: 'dom-green',
+          buttonTextAfter: res.buttonTextAfter || 'Sudah Absen',
+          pageUrl: location.href,
+        }, { persistMode: 'always' });
         plog('ok', 'VERIFIKASI', `SUCCESS — tombol jadi HIJAU (percobaan ${attempt}): ${sig.slice(0, 60)}`);
         results[sig] = 'clicked'; buildJadwal(attendanceButtons());
+        if (up.changed && activeProofSig === up.key) renderProofDrawer(false);
         await markClicked(sig);
         return true;
       }
-      if (res === 'gone') {
+      if (res.status === 'gone') {
+        const nowIso = new Date().toISOString();
+        const up = upsertProof({
+          sig,
+          nama: meta.nama,
+          dosen: meta.dosen,
+          jam: meta.jam,
+          nim: meta.nim,
+          studentNama: meta.studentNama,
+          recordedAt: nowIso,
+          verifiedAt: nowIso,
+          verifiedBy: 'row-cleared',
+          buttonTextAfter: '',
+          pageUrl: location.href,
+        }, { persistMode: 'always' });
         plog('ok', 'VERIFIKASI', `SUCCESS — halaman/DOM berubah setelah klik (percobaan ${attempt}): ${sig.slice(0, 60)}`);
         results[sig] = 'clicked'; buildJadwal(attendanceButtons());
+        if (up.changed && activeProofSig === up.key) renderProofDrawer(false);
         await markClicked(sig);
         return true;
       }
-      plog('warn', 'VERIFIKASI', `Percobaan ${attempt}/${cfg.maxRetry}: masih ${colorLabel(res)}, tekan lagi... — ${sig.slice(0, 55)}`);
+      plog('warn', 'VERIFIKASI', `Percobaan ${attempt}/${cfg.maxRetry}: masih ${colorLabel(res.status)}, tekan lagi...: ${sig.slice(0, 55)}`);
     }
     plog('fail', 'VERIFIKASI', `GAGAL — tombol tidak jadi hijau setelah ${cfg.maxRetry} percobaan: ${sig.slice(0, 60)}. Kemungkinan request ditolak server / bukan waktu absen.`);
     results[sig] = 'failed'; buildJadwal(attendanceButtons());
@@ -539,13 +956,21 @@
       const info = rowInfo(b);
       const sig = signatureOf(b);
       const color = classify(b);
+      const cleanDosen = namaDosen(info.dosen);
+      const proofKey = findProofKeyForRow(sig, { nama: info.nama, jam: info.jam, dosen: cleanDosen });
       // Berhasil diabsenkan -> ikut hijau (SUDAH ABSEN). Gagal -> tetap biru
       // supaya ikut dicoba lagi di polling berikutnya.
       const status = results[sig] === 'clicked' ? 'green' : color;
       // Kolom terakhir diisi DOSEN, bukan alasan status: alasannya sudah
       // terbaca dari badge Status, dan kejadian absennya ada di Log Aktivitas.
-      return { nama: info.nama.slice(0, 48), jam: info.jam, status,
-               dosen: namaDosen(info.dosen) };
+      return {
+        sig,
+        proofKey,
+        nama: info.nama.slice(0, 48),
+        jam: info.jam,
+        status,
+        dosen: cleanDosen,
+      };
     });
     renderJadwal();
   }
@@ -555,12 +980,57 @@
     if (scanning) return;
     scanning = true; passes++;
     try {
+      await initProofStore();
       const btns = attendanceButtons();
       const counts = { blue: 0, green: 0, orange: 0, red: 0, unknown: 0 };
       btns.forEach(b => counts[classify(b)]++);
 
+      // Sinkronkan bukti kehadiran untuk baris hijau yang terlihat di DOM tanpa menulis ulang storage berulang kali.
+      let drawerNeedsRefresh = false;
+      for (const b of btns) {
+        if (classify(b) !== 'green') continue;
+        const sig = signatureOf(b);
+        const meta = extractRowMeta(b);
+        const existingKey = findProofKeyForRow(sig, meta);
+        const existing = existingKey ? proofStore.items[existingKey] : null;
+        const btnTxt = (textOf(b).replace(/\s+/g, ' ').trim() || b.value || 'Sudah Absen');
+        const nowIso = new Date().toISOString();
+
+        if (existing && existing.verifiedBy === 'row-cleared') {
+          const up = upsertProof({
+            sig: existing.sig,
+            nama: meta.nama,
+            dosen: meta.dosen,
+            jam: meta.jam,
+            nim: meta.nim,
+            studentNama: meta.studentNama,
+            verifiedAt: nowIso,
+            verifiedBy: 'dom-green',
+            buttonTextAfter: btnTxt,
+            pageUrl: location.href,
+          }, { persistMode: 'always' });
+          if (up.changed && activeProofSig === up.key) drawerNeedsRefresh = true;
+        } else if (!existing) {
+          const up = upsertProof({
+            sig,
+            nama: meta.nama,
+            dosen: meta.dosen,
+            jam: meta.jam,
+            nim: meta.nim,
+            studentNama: meta.studentNama,
+            recordedAt: nowIso,
+            verifiedAt: nowIso,
+            verifiedBy: 'observed-green',
+            buttonTextAfter: btnTxt,
+            pageUrl: location.href,
+          }, { persistMode: 'if-missing' });
+          if (up.changed && activeProofSig === up.key) drawerNeedsRefresh = true;
+        }
+      }
+
       // Panel dashboard: tabel + status bar di-update in-place tiap scan.
       buildJadwal(btns);
+      if (drawerNeedsRefresh) renderProofDrawer(false);
       ui.passes = passes;
       ui.nextIn = Math.round(cfg.pollMs / 1000);
       ui.lastScan = `${now()} (${counts.blue} siap absen | ${counts.green} sudah absen | ` +
@@ -690,6 +1160,7 @@
       // Beri tahu background flow selesai -> lepas trigger agar kunjungan
       // berikutnya (tanpa tombol) tidak ikut ke-run.
       try { chrome.runtime.sendMessage({ type: 'PAA_DONE' }); } catch (e) {}
+      await initProofStore();
       if (!cfg.autoClick) { plog('info', 'SCAN', 'autoClick nonaktif.'); return; }
       scanAndClick();
       const iv = setInterval(() => {

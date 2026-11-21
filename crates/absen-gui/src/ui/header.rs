@@ -19,6 +19,7 @@ pub enum HeaderAction {
     StartMonitoring,
     StopMonitoring,
     ScanNow,
+    OpenProofs,
     OpenSettings,
     CycleTheme,
     StartUpdate,
@@ -84,11 +85,12 @@ pub fn show(
     palette: &Palette,
     width: f32,
     update_status: &UpdateStatus,
+    proof_btn_label: &str,
 ) -> Option<HeaderAction> {
     let mut action = None;
     let is_active = snapshot.status.is_active();
     let stacked_actions =
-        width < ThemeTokens::BREAKPOINT_HEADER_STACK || (!is_active && width < 880.0);
+        width < ThemeTokens::BREAKPOINT_HEADER_STACK || (!is_active && width < 980.0);
     let is_compact = width < ThemeTokens::BREAKPOINT_MEDIUM;
     let has_account = !configured_nim.trim().is_empty();
     let (tone, st_icon, st_label) = status_visuals(snapshot.status);
@@ -116,21 +118,52 @@ pub fn show(
                     &mut action,
                 );
                 ui.add_space(ThemeTokens::SPACE_MD);
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = Vec2::splat(ThemeTokens::SPACE_SM);
-                    render_action_buttons(
-                        ui,
-                        palette,
-                        has_account,
-                        is_active,
-                        is_dark,
-                        &mut action,
-                    );
-                });
+                let single_row_needed = if is_active { 560.0 } else { 670.0 };
+                if ui.available_width() >= single_row_needed {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::splat(ThemeTokens::SPACE_SM);
+                        render_primary_action_buttons(
+                            ui,
+                            palette,
+                            has_account,
+                            is_active,
+                            &mut action,
+                        );
+                        render_secondary_action_buttons(
+                            ui,
+                            palette,
+                            is_dark,
+                            proof_btn_label,
+                            &mut action,
+                        );
+                    });
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::splat(ThemeTokens::SPACE_SM);
+                        render_primary_action_buttons(
+                            ui,
+                            palette,
+                            has_account,
+                            is_active,
+                            &mut action,
+                        );
+                    });
+                    ui.add_space(ThemeTokens::SPACE_SM);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::splat(ThemeTokens::SPACE_SM);
+                        render_secondary_action_buttons(
+                            ui,
+                            palette,
+                            is_dark,
+                            proof_btn_label,
+                            &mut action,
+                        );
+                    });
+                }
             } else {
                 ui.horizontal(|ui| {
                     let avail = ui.available_width();
-                    let actions_reserve = if is_active { 385.0 } else { 520.0 };
+                    let actions_reserve = if is_active { 535.0 } else { 660.0 };
                     let left_w = (avail - actions_reserve - ThemeTokens::SPACE_MD).max(200.0);
 
                     ui.allocate_ui_with_layout(
@@ -158,6 +191,7 @@ pub fn show(
                             has_account,
                             is_active,
                             is_dark,
+                            proof_btn_label,
                             &mut action,
                         );
                     });
@@ -390,12 +424,33 @@ fn render_theme_button(
     }
 }
 
-fn render_action_buttons(
+fn render_proofs_button(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    proof_btn_label: &str,
+    action: &mut Option<HeaderAction>,
+) {
+    if action_button(
+        ui,
+        palette,
+        ButtonTone::Secondary,
+        proof_btn_label,
+        Some(icons::draw_shield_check),
+        true,
+        0.0,
+    )
+    .on_hover_text("Buka bukti kehadiran tersimpan (14 hari terakhir)")
+    .clicked()
+    {
+        *action = Some(HeaderAction::OpenProofs);
+    }
+}
+
+fn render_primary_action_buttons(
     ui: &mut egui::Ui,
     palette: &Palette,
     has_account: bool,
     is_active: bool,
-    is_dark: bool,
     action: &mut Option<HeaderAction>,
 ) {
     if is_active {
@@ -445,6 +500,16 @@ fn render_action_buttons(
     } else if !is_active {
         scan_resp.on_disabled_hover_text("Mulai pemantauan terlebih dahulu untuk cek manual (F5)");
     }
+}
+
+fn render_secondary_action_buttons(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    is_dark: bool,
+    proof_btn_label: &str,
+    action: &mut Option<HeaderAction>,
+) {
+    render_proofs_button(ui, palette, proof_btn_label, action);
 
     render_theme_button(ui, palette, is_dark, action);
 
@@ -469,6 +534,7 @@ fn render_action_buttons_rtl(
     has_account: bool,
     is_active: bool,
     is_dark: bool,
+    proof_btn_label: &str,
     action: &mut Option<HeaderAction>,
 ) {
     if action_button(
@@ -486,6 +552,8 @@ fn render_action_buttons_rtl(
     }
 
     render_theme_button(ui, palette, is_dark, action);
+
+    render_proofs_button(ui, palette, proof_btn_label, action);
 
     let scan_resp = action_button(
         ui,

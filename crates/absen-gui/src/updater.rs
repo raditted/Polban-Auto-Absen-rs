@@ -476,8 +476,45 @@ pub fn apply_update_and_restart(plan: &RestartPlan, release_lock: &dyn Fn()) -> 
     Ok(())
 }
 
-/// Open a release web URL in the user's default browser cleanly.
+/// Return `true` only when `url` is an `http://` or `https://` URL with a non-empty host
+/// and zero whitespace, control characters, or shell metacharacters.
+pub fn is_safe_http_url(url: &str) -> bool {
+    if url.is_empty()
+        || url.chars().any(|c| {
+            c.is_whitespace()
+                || c.is_control()
+                || matches!(
+                    c,
+                    '&' | '|'
+                        | '^'
+                        | '<'
+                        | '>'
+                        | '"'
+                        | '\''
+                        | '`'
+                        | '$'
+                        | '('
+                        | ')'
+                        | ';'
+                        | '%'
+                        | '!'
+                        | '\\'
+                )
+        })
+    {
+        return false;
+    }
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    matches!(parsed.scheme(), "http" | "https") && parsed.has_host()
+}
+
+/// Open a validated `http://` or `https://` URL in the user's default browser cleanly.
 pub fn open_url_in_browser(url: &str) -> Result<(), String> {
+    if !is_safe_http_url(url) {
+        return Err("URL tidak valid atau skema tidak diizinkan.".to_string());
+    }
     #[cfg(target_os = "windows")]
     {
         Command::new("cmd")
@@ -1196,5 +1233,32 @@ mod tests {
         assert!(err.contains("SHA256"));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn is_safe_http_url_and_open_url_reject_unsafe_schemes_and_metacharacters() {
+        assert!(is_safe_http_url("https://akademik.polban.ac.id/ajar/absen"));
+        assert!(is_safe_http_url("http://127.0.0.1:8080/ajar/absen"));
+
+        let rejected = [
+            "",
+            "   ",
+            "javascript:alert(1)",
+            "file:///C:/Windows/System32/calc.exe",
+            "ms-msdt:/id PCWDiagnostic",
+            "https://akademik.polban.ac.id/ajar/absen & calc.exe",
+            "https://akademik.polban.ac.id/ajar/absen|calc",
+            "https://akademik.polban.ac.id/ajar/absen^calc",
+            "https://akademik.polban.ac.id/ajar/absen>out.txt",
+            "https://akademik.polban.ac.id/ajar/\"absen\"",
+            "https://akademik.polban.ac.id/ajar/%COMSPEC%",
+            "https://",
+            " http://akademik.polban.ac.id",
+        ];
+        for bad in rejected {
+            assert!(!is_safe_http_url(bad), "expected rejection for {bad:?}");
+            let err = open_url_in_browser(bad).expect_err("unsafe URL must not spawn browser");
+            assert!(err.contains("tidak valid"));
+        }
     }
 }

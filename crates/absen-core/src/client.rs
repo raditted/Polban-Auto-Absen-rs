@@ -47,6 +47,14 @@ pub enum LoginOutcome {
     Failed { redirect_url: String },
 }
 
+/// Metadata-enriched response from `POST /ajar/absen/absensi_awal`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostResponse {
+    pub status: u16,
+    pub body: String,
+    pub server_date: Option<String>,
+}
+
 /// Reusable HTTP client for Polban academic portal.
 #[derive(Clone)]
 pub struct AbsenClient {
@@ -117,6 +125,16 @@ impl AbsenClient {
 
     /// Submit AJAX attendance POST with `X-Requested-With`, `Referer`, and `Origin`.
     pub fn post_absen(&self, cfg: &Config, action: &Action) -> Result<(u16, String), ClientError> {
+        let resp = self.post_absen_with_meta(cfg, action)?;
+        Ok((resp.status, resp.body))
+    }
+
+    /// Submit AJAX attendance POST and also capture the HTTP `Date` response header.
+    pub fn post_absen_with_meta(
+        &self,
+        cfg: &Config,
+        action: &Action,
+    ) -> Result<PostResponse, ClientError> {
         let resp = self
             .http
             .post(&action.url)
@@ -127,8 +145,18 @@ impl AbsenClient {
             .send()
             .map_err(ClientError::Http)?;
         let status = resp.status().as_u16();
+        let server_date = resp
+            .headers()
+            .get(reqwest::header::DATE)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         let body = resp.text().map_err(ClientError::Http)?;
-        Ok((status, body))
+        Ok(PostResponse {
+            status,
+            body,
+            server_date,
+        })
     }
 
     /// Login and save raw target HTML to `out_path` for diagnostics (`--dump`).

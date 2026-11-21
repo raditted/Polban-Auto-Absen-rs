@@ -7,17 +7,18 @@ use egui::{Align, Layout, RichText, Rounding, Stroke, Vec2};
 use crate::bridge::{CourseItem, EngineStatus, GuiSnapshot};
 use crate::theme::{Palette, ThemeTokens};
 use crate::ui::{
-    action_button, icons, mono_text, sanitize_dash, semibold_text, status_badge,
+    action_button, icons, mono_text, paint_focus_ring, sanitize_dash, semibold_text, status_badge,
     status_badge_width, ButtonTone, SemanticTone,
 };
 
-/// Recovery or monitoring action triggered from the schedule panel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Recovery, monitoring, or proof preview action triggered from the schedule panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JadwalAction {
     OpenSettings,
     RetryConnection,
     StartMonitoring,
     ScanNow,
+    OpenProof(String),
 }
 
 fn course_badge_meta(
@@ -162,10 +163,10 @@ pub fn show(
                     .id_salt("jadwal_list_scroll")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        render_course_list(ui, &snapshot.courses, palette);
+                        render_course_list(ui, snapshot, palette, &mut action);
                     });
             } else {
-                render_course_list(ui, &snapshot.courses, palette);
+                render_course_list(ui, snapshot, palette, &mut action);
             }
         });
 
@@ -323,16 +324,72 @@ fn show_empty_state(
         });
 }
 
-fn render_course_list(ui: &mut egui::Ui, courses: &[CourseItem], palette: &Palette) {
+fn render_course_list(
+    ui: &mut egui::Ui,
+    snapshot: &GuiSnapshot,
+    palette: &Palette,
+    action: &mut Option<JadwalAction>,
+) {
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing = Vec2::splat(ThemeTokens::SPACE_SM);
-        for course in courses {
-            render_course_card(ui, course, palette);
+        for course in &snapshot.courses {
+            render_course_card(ui, course, snapshot, palette, action);
         }
     });
 }
 
-fn render_course_card(ui: &mut egui::Ui, course: &CourseItem, palette: &Palette) {
+fn compact_proof_button(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    label: &str,
+    width: f32,
+) -> egui::Response {
+    let desired = Vec2::new(width, 26.0);
+    let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::click());
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if ui.is_rect_visible(rect) {
+        let hovered = response.hovered();
+        let fill = if hovered {
+            palette.emerald_bg
+        } else {
+            palette.bg_surface
+        };
+        let border = if hovered {
+            palette.emerald_text
+        } else {
+            palette.emerald_border
+        };
+        ui.painter().rect(
+            rect,
+            Rounding::same(ThemeTokens::RADIUS_TAG),
+            fill,
+            Stroke::new(1.0_f32, border),
+        );
+        let galley = ui.painter().layout_no_wrap(
+            label.to_string(),
+            egui::FontId::new(
+                11.5,
+                egui::FontFamily::Name(ThemeTokens::FONT_SEMIBOLD_FAMILY.into()),
+            ),
+            palette.emerald_text,
+        );
+        let text_pos = egui::Pos2::new(
+            rect.center().x - galley.size().x * 0.5,
+            rect.center().y - galley.size().y * 0.5,
+        );
+        ui.painter().galley(text_pos, galley, palette.emerald_text);
+        paint_focus_ring(ui, &response, palette, ThemeTokens::RADIUS_TAG);
+    }
+    response
+}
+
+fn render_course_card(
+    ui: &mut egui::Ui,
+    course: &CourseItem,
+    snapshot: &GuiSnapshot,
+    palette: &Palette,
+    action: &mut Option<JadwalAction>,
+) {
     let (tone, badge_icon, default_label) = course_badge_meta(course.color);
     let badge_label = default_label;
     let card_border = if course.color == Color::Blue {
@@ -352,6 +409,11 @@ fn render_course_card(ui: &mut egui::Ui, course: &CourseItem, palette: &Palette)
     };
     let time_display = format_clean_time(&course.jam);
     let note = helpful_course_note(course);
+    let proof = if course.color == Color::Green {
+        snapshot.proof_for_course(course)
+    } else {
+        None
+    };
 
     egui::Frame::none()
         .fill(card_fill)
@@ -428,6 +490,54 @@ fn render_course_card(ui: &mut egui::Ui, course: &CourseItem, palette: &Palette)
                                 .color(palette.text_secondary),
                         );
                     }
+                });
+            }
+
+            // Row 4 (Green cards with proof only): single-line micro-proof summary + Lihat Bukti
+            if let Some(proof) = proof {
+                ui.add_space(ThemeTokens::SPACE_SM);
+                let btn_label = "Lihat Bukti";
+                let btn_galley = ui.painter().layout_no_wrap(
+                    btn_label.to_string(),
+                    egui::FontId::new(
+                        11.5,
+                        egui::FontFamily::Name(ThemeTokens::FONT_SEMIBOLD_FAMILY.into()),
+                    ),
+                    palette.emerald_text,
+                );
+                let btn_w = (btn_galley.size().x + 18.0).max(78.0);
+                let row_gap = ThemeTokens::SPACE_SM;
+                let summary_w = (avail - btn_w - row_gap).max(100.0);
+
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = row_gap;
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(summary_w, 0.0),
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            ui.set_max_width(summary_w);
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            icons::paint_icon(ui, 12.0, palette.emerald_text, icons::draw_check);
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&proof.inline_summary)
+                                        .size(12.0)
+                                        .color(palette.emerald_text),
+                                )
+                                .wrap(),
+                            );
+                        },
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if compact_proof_button(ui, palette, btn_label, btn_w).clicked() {
+                            let target_key = if !proof.proof_id.is_empty() {
+                                proof.proof_id.clone()
+                            } else {
+                                proof.sig.clone()
+                            };
+                            *action = Some(JadwalAction::OpenProof(target_key));
+                        }
+                    });
                 });
             }
         });

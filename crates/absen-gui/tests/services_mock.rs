@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use absen_core::config::{Config, DEFAULT_ENGINE};
-use absen_core::{Color, UserInfo};
+use absen_core::{Color, ProofVerification, UserInfo};
 use absen_gui::bridge::{EngineController, EngineStatus, GuiSnapshot};
 use absen_gui::platform::Notifier;
 use httpmock::prelude::*;
@@ -383,5 +383,131 @@ fn dump_diagnostic_html_writes_portal_html_and_handles_login_failure() {
     assert!(!err.contains(concat!(" ", "-", "-", " ")));
     assert!(!err.contains('\u{2014}'));
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn engine_controller_emits_proof_and_upgrades_post_accepted_to_portal_verified() {
+    let server = MockServer::start();
+    let dir = temp_dir("proof_lifecycle");
+    let cfg = test_config(&server.base_url(), dir.join("clicked.json"), 30);
+
+    server.mock(|when, then| {
+        when.method(POST).path("/laman/login");
+        then.status(200)
+            .header("Set-Cookie", "ci_session=proof1; Path=/")
+            .body("ok");
+    });
+    let mut m_target = server.mock(|when, then| {
+        when.method(GET)
+            .path("/ajar/absen")
+            .header("Cookie", "ci_session=proof1");
+        then.status(200).body(JADWAL_MIXED_HTML);
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/ajar/absen/absensi_awal")
+            .header("X-Requested-With", "XMLHttpRequest");
+        then.status(200)
+            .header("Date", "Sat, 21 Nov 2026 00:05:12 GMT")
+            .body(r#"{"status":"ok"}"#);
+    });
+
+    let mut controller = EngineController::new();
+    controller.set_notifier(Notifier::new(false));
+    controller.start(cfg, true, None).unwrap();
+
+    // Wait for cycle 1 POST to emit PostAccepted proof.
+    let snap1 = wait_until(
+        Duration::from_secs(5),
+        |s| {
+            s.cycle >= 1
+                && s.countdown_secs > 0
+                && !s.proofs.is_empty()
+                && s.activities
+                    .iter()
+                    .any(|a| a.code == "ABSEN" && a.proof_key.is_some())
+        },
+        &controller,
+    );
+
+    assert_eq!(snap1.proofs.len(), 1);
+    assert!(snap1.has_portal_snapshot);
+    assert!(snap1.portal_snapshot_captured_at.is_some());
+    let p1 = &snap1.proofs[0];
+    assert_eq!(p1.nama_mk, "Struktur Data");
+    assert_eq!(p1.verification, ProofVerification::PostAccepted);
+    assert!(p1.inline_summary.contains("Diterima server"));
+    assert!(p1.proof_id.starts_with("PRF-"));
+
+    let absen_act = snap1
+        .activities
+        .iter()
+        .find(|a| a.code == "ABSEN" && a.proof_key.is_some())
+        .expect("expected ABSEN activity linked to proof");
+    assert_eq!(
+        snap1
+            .proof_by_key(absen_act.proof_key.as_deref().unwrap())
+            .map(|p| p.proof_id.as_str()),
+        Some(p1.proof_id.as_str())
+    );
+
+    // Portal now returns Sudah Absen green row; trigger ScanNow and verify live upgrade.
+    m_target.delete();
+    server.mock(|when, then| {
+        when.method(GET)
+            .path("/ajar/absen")
+            .header("Cookie", "ci_session=proof1");
+        then.status(200).body(JADWAL_GREEN_HTML);
+    });
+    assert!(controller.scan_now());
+
+    let snap2 = wait_until(
+        Duration::from_secs(5),
+        |s| {
+            s.cycle >= 2
+                && s.proofs
+                    .iter()
+                    .any(|p| p.verification == ProofVerification::PortalVerified)
+        },
+        &controller,
+    );
+
+    assert_eq!(snap2.proofs.len(), 1, "upgrade must replace in-place");
+    let p2 = &snap2.proofs[0];
+    assert_eq!(p2.proof_id, p1.proof_id);
+    assert_eq!(p2.verification, ProofVerification::PortalVerified);
+    assert!(p2.inline_summary.contains("Terverifikasi portal"));
+    assert_eq!(p2.server_button_label.as_deref(), Some("Sudah Absen"));
+    assert!(p2.verified_time_hms.is_some());
+
+    // Wait for serialized screenshot worker to capture and save `<proof_id>.png`.
+    let snap3 = wait_until(
+        Duration::from_secs(12),
+        |s| s.screenshot_revision >= 1 && s.capturing_proof_id.is_none(),
+        &controller,
+    );
+    assert!(snap3.screenshot_revision >= 1);
+    let shot_path = controller.screenshot_path_for(&p2.proof_id);
+    assert!(
+        shot_path.is_file(),
+        "expected auto-captured proof PNG at {}",
+        shot_path.display()
+    );
+    let png_bytes = std::fs::read(&shot_path).unwrap();
+    assert!(png_bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+
+    // Verify on-demand live portal preview uses cached HTML without extra HTTP requests.
+    let rx = controller
+        .request_live_portal_preview()
+        .expect("expected live portal preview receiver");
+    let (live_png, _src, captured_at) = rx
+        .recv_timeout(Duration::from_secs(12))
+        .expect("live preview should finish")
+        .expect("live preview should succeed");
+    assert!(live_png.starts_with(b"\x89PNG\r\n\x1a\n"));
+    assert!(!captured_at.is_empty());
+
+    controller.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }

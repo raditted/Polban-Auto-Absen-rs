@@ -8,9 +8,12 @@ use absen_core::config::{
 };
 use absen_core::engine::{run, run_with_commands, EngineCommand, EngineError};
 use absen_core::event::{Event, Reporter, VecReporter};
-use absen_core::state::ClickedState;
-use absen_core::{AbsenClient, Action, Color, LogLevel};
-use chrono::Local;
+use absen_core::state::{proof_path_for, ClickedState, ProofStore};
+use absen_core::{
+    generate_proof_id, AbsenClient, Action, AttendanceProof, Color, LogLevel, PortalPageSnapshot,
+    ProofVerification,
+};
+use chrono::{Duration as ChronoDuration, Local};
 use httpmock::prelude::*;
 
 const LOGIN_HTML: &str = include_str!("fixtures/login.html");
@@ -644,4 +647,604 @@ fn run_with_commands_scan_now_triggers_immediate_cycle_and_stop_exits() {
     assert_eq!(m_target.hits(), 2);
 
     let _ = std::fs::remove_dir_all(state_path.parent().unwrap());
+}
+
+#[test]
+fn direct_post_success_emits_post_accepted_proof_without_extra_get() {
+    let server = MockServer::start();
+    let state_path = temp_state_path("proof_direct");
+    let cfg = test_config(&server.base_url(), state_path.clone());
+    let client = AbsenClient::new(&cfg.base_url).unwrap();
+
+    server.mock(|when, then| {
+        when.method(POST).path("/laman/login");
+        then.status(200).body("ok");
+    });
+    let m_get = server.mock(|when, then| {
+        when.method(GET).path("/ajar/absen");
+        then.status(200).body(JADWAL_ONE_BLUE_HTML);
+    });
+    let m_post = server.mock(|when, then| {
+        when.method(POST).path("/ajar/absen/absensi_awal");
+        then.status(200)
+            .header("Date", "Sat, 21 Nov 2026 00:10:00 GMT")
+            .body(r#"<div class="alert">{"status":"ok"}</div>"#);
+    });
+
+    let reporter = VecReporter::new();
+    let (_tx, rx) = mpsc::channel();
+    run(&cfg, &client, false, &reporter, &rx).unwrap();
+
+    m_get.assert_hits(1);
+    m_post.assert_hits(1);
+
+    let proofs: Vec<_> = reporter
+        .snapshot()
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::AttendanceProof(p) => Some(p),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(proofs.len(), 1);
+    let p = &proofs[0];
+    assert_eq!(p.verification, ProofVerification::PostAccepted);
+    assert_eq!(p.http_status, Some(200));
+    assert_eq!(
+        p.server_date_header.as_deref(),
+        Some("Sat, 21 Nov 2026 00:10:00 GMT")
+    );
+    assert_eq!(p.server_response.as_deref(), Some(r#"{"status":"ok"}"#));
+    assert_eq!(p.nim, "251511001");
+    assert_eq!(p.student_nama, "Budi Santoso");
+    assert_eq!(p.mk_code, "25IF201");
+    assert_eq!(p.kls, "1A");
+    assert_eq!(p.tp, "T");
+    assert_eq!(p.ja, "1");
+    assert_eq!(p.jb, "3");
+    assert_eq!(p.attempt, Some(1));
+    assert!(p.verified_at.is_none());
+
+    let store = ProofStore::load(proof_path_for(&state_path));
+    assert_eq!(store.len(), 1);
+
+    let _ = std::fs::remove_dir_all(state_path.parent().unwrap());
+}
+
+#[test]
+fn ambiguous_post_confirmed_by_still_blue_emits_portal_verified_and_updated_jadwal() {
+    let server = MockServer::start();
+    let state_path = temp_state_path("proof_still_blue");
+    let cfg = test_config(&server.base_url(), state_path.clone());
+    let client = AbsenClient::new(&cfg.base_url).unwrap();
+
+    server.mock(|when, then| {
+        when.method(POST).path("/laman/login");
+        then.status(200).body("ok");
+    });
+    let m_blue = server.mock(|when, then| {
+        when.method(GET).path("/ajar/absen");
+        then.status(200).body(JADWAL_ONE_BLUE_HTML);
+    });
+    server.mock(|when, then| {
+        when.method(POST).path("/ajar/absen/absensi_awal");
+        then.status(200).body(r#"{"status":false}"#);
+    });
+
+    struct SwapToGreen<'a> {
+        server: &'a MockServer,
+        m_blue: Mutex<Option<httpmock::Mock<'a>>>,
+        events: Mutex<Vec<Event>>,
+    }
+    impl<'a> Reporter for SwapToGreen<'a> {
+        fn emit(&self, event: Event) {
+            if let Event::Log { code, message, .. } = &event {
+                if code == "ABSEN" && message.starts_with("target:") {
+                    if let Some(mut m) = self.m_blue.lock().unwrap().take() {
+                        m.delete();
+                        self.server.mock(|when, then| {
+                            when.method(GET).path("/ajar/absen");
+                            then.status(200).body(JADWAL_GREEN_HTML);
+                        });
+                    }
+                }
+            }
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    let reporter = SwapToGreen {
+        server: &server,
+        m_blue: Mutex::new(Some(m_blue)),
+        events: Mutex::new(Vec::new()),
+    };
+    let (_tx, rx) = mpsc::channel();
+    run(&cfg, &client, false, &reporter, &rx).unwrap();
+
+    let events = reporter.events.lock().unwrap();
+    let jadwal_events: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Jadwal { actions, skips } => Some((actions, skips)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(jadwal_events.len(), 2);
+    assert!(jadwal_events[1].0.is_empty());
+    assert_eq!(jadwal_events[1].1[0].color, Color::Green);
+
+    let proofs: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::AttendanceProof(p) => Some(p),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(proofs.len(), 1);
+    assert_eq!(proofs[0].verification, ProofVerification::PortalVerified);
+    assert!(proofs[0].verified_at.is_some());
+    assert_eq!(
+        proofs[0].server_button_label.as_deref(),
+        Some("Sudah Absen")
+    );
+
+    let _ = std::fs::remove_dir_all(state_path.parent().unwrap());
+}
+
+#[test]
+fn next_scan_seeing_green_upgrades_post_accepted_to_portal_verified_once() {
+    let server = MockServer::start();
+    let state_path = temp_state_path("proof_upgrade_scan");
+    let mut cfg = test_config(&server.base_url(), state_path.clone());
+    cfg.interval = 0;
+    let client = AbsenClient::new(&cfg.base_url).unwrap();
+
+    server.mock(|when, then| {
+        when.method(POST).path("/laman/login");
+        then.status(200).body("ok");
+    });
+    let m_blue = server.mock(|when, then| {
+        when.method(GET).path("/ajar/absen");
+        then.status(200).body(JADWAL_ONE_BLUE_HTML);
+    });
+    server.mock(|when, then| {
+        when.method(POST).path("/ajar/absen/absensi_awal");
+        then.status(200).body("ok");
+    });
+
+    struct MultiCycleUpgrade<'a> {
+        server: &'a MockServer,
+        m_blue: Mutex<Option<httpmock::Mock<'a>>>,
+        cycles: AtomicUsize,
+        shutdown_tx: mpsc::Sender<()>,
+        events: Mutex<Vec<Event>>,
+    }
+    impl<'a> Reporter for MultiCycleUpgrade<'a> {
+        fn emit(&self, event: Event) {
+            if matches!(event, Event::LastScan(_)) {
+                let c = self.cycles.fetch_add(1, Ordering::SeqCst) + 1;
+                if c == 1 {
+                    if let Some(mut m) = self.m_blue.lock().unwrap().take() {
+                        m.delete();
+                        self.server.mock(|when, then| {
+                            when.method(GET).path("/ajar/absen");
+                            then.status(200).body(JADWAL_GREEN_HTML);
+                        });
+                    }
+                } else if c >= 3 {
+                    let _ = self.shutdown_tx.send(());
+                }
+            }
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    let (tx, rx) = mpsc::channel();
+    let reporter = MultiCycleUpgrade {
+        server: &server,
+        m_blue: Mutex::new(Some(m_blue)),
+        cycles: AtomicUsize::new(0),
+        shutdown_tx: tx,
+        events: Mutex::new(Vec::new()),
+    };
+    run(&cfg, &client, true, &reporter, &rx).unwrap();
+
+    let events = reporter.events.lock().unwrap();
+    let proofs: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::AttendanceProof(p) => Some(p),
+            _ => None,
+        })
+        .collect();
+    // Emitted once as PostAccepted on cycle 1, then once as PortalVerified on cycle 2; cycle 3 emits nothing.
+    assert_eq!(proofs.len(), 2);
+    assert_eq!(proofs[0].verification, ProofVerification::PostAccepted);
+    assert_eq!(proofs[1].verification, ProofVerification::PortalVerified);
+    assert_eq!(proofs[0].proof_id, proofs[1].proof_id);
+    assert_eq!(
+        proofs[1].server_button_label.as_deref(),
+        Some("Sudah Absen")
+    );
+
+    let store = ProofStore::load(proof_path_for(&state_path));
+    assert_eq!(store.len(), 1);
+    assert_eq!(
+        store.all()[0].verification,
+        ProofVerification::PortalVerified
+    );
+
+    let _ = std::fs::remove_dir_all(state_path.parent().unwrap());
+}
+
+#[test]
+fn already_green_row_emits_observed_present_once_without_writing_proofs_file() {
+    let server = MockServer::start();
+    let state_path = temp_state_path("proof_observed_green");
+    let mut cfg = test_config(&server.base_url(), state_path.clone());
+    cfg.interval = 0;
+    let client = AbsenClient::new(&cfg.base_url).unwrap();
+
+    server.mock(|when, then| {
+        when.method(POST).path("/laman/login");
+        then.status(200).body("ok");
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/ajar/absen");
+        then.status(200).body(JADWAL_GREEN_HTML);
+    });
+
+    struct StopAfterTwoScans {
+        scans: AtomicUsize,
+        tx: mpsc::Sender<()>,
+        events: Mutex<Vec<Event>>,
+    }
+    impl Reporter for StopAfterTwoScans {
+        fn emit(&self, event: Event) {
+            if matches!(event, Event::LastScan(_))
+                && self.scans.fetch_add(1, Ordering::SeqCst) + 1 >= 2
+            {
+                let _ = self.tx.send(());
+            }
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    let (tx, rx) = mpsc::channel();
+    let reporter = StopAfterTwoScans {
+        scans: AtomicUsize::new(0),
+        tx,
+        events: Mutex::new(Vec::new()),
+    };
+    run(&cfg, &client, true, &reporter, &rx).unwrap();
+
+    let events = reporter.events.lock().unwrap();
+    let proofs: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::AttendanceProof(p) => Some(p),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(proofs.len(), 1);
+    assert_eq!(proofs[0].verification, ProofVerification::ObservedPresent);
+    assert_eq!(
+        proofs[0].server_button_label.as_deref(),
+        Some("Sudah Absen")
+    );
+    assert!(!proof_path_for(&state_path).exists());
+
+    let _ = std::fs::remove_dir_all(state_path.parent().unwrap());
+}
+
+#[test]
+fn restart_reloads_persisted_todays_proofs() {
+    let server = MockServer::start();
+    let state_path = temp_state_path("proof_restart");
+    let cfg = test_config(&server.base_url(), state_path.clone());
+    let client = AbsenClient::new(&cfg.base_url).unwrap();
+
+    server.mock(|when, then| {
+        when.method(POST).path("/laman/login");
+        then.status(200).body("ok");
+    });
+    let mut m_get = server.mock(|when, then| {
+        when.method(GET).path("/ajar/absen");
+        then.status(200).body(JADWAL_ONE_BLUE_HTML);
+    });
+    server.mock(|when, then| {
+        when.method(POST).path("/ajar/absen/absensi_awal");
+        then.status(200).body("ok");
+    });
+
+    // Run 1: click and persist PostAccepted.
+    let rep1 = VecReporter::new();
+    let (_tx1, rx1) = mpsc::channel();
+    run(&cfg, &client, false, &rep1, &rx1).unwrap();
+
+    // Run 2 (restart): page still blue -> skipped via ClickedState, startup still emits persisted proof.
+    m_get.delete();
+    server.mock(|when, then| {
+        when.method(GET).path("/ajar/absen");
+        then.status(200).body(JADWAL_ONE_BLUE_HTML);
+    });
+    let rep2 = VecReporter::new();
+    let (_tx2, rx2) = mpsc::channel();
+    run(&cfg, &client, false, &rep2, &rx2).unwrap();
+
+    let proofs2: Vec<_> = rep2
+        .snapshot()
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::AttendanceProof(p) => Some(p),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(proofs2.len(), 1);
+    assert_eq!(proofs2[0].verification, ProofVerification::PostAccepted);
+    assert_eq!(proofs2[0].nama_mk, "Struktur Data");
+
+    let _ = std::fs::remove_dir_all(state_path.parent().unwrap());
+}
+
+#[test]
+fn startup_emits_retained_history_oldest_first_and_scopes_green_upgrade_to_today() {
+    let server = MockServer::start();
+    let state_path = temp_state_path("proof_history_scoped");
+    let cfg = test_config(&server.base_url(), state_path.clone());
+    let client = AbsenClient::new(&cfg.base_url).unwrap();
+
+    let today = Local::now().date_naive();
+    let two_days_ago = today - ChronoDuration::days(2);
+    let yesterday = today - ChronoDuration::days(1);
+    let today_str = today.format("%Y-%m-%d").to_string();
+    let two_days_ago_str = two_days_ago.format("%Y-%m-%d").to_string();
+    let yesterday_str = yesterday.format("%Y-%m-%d").to_string();
+
+    let shared_key = "Struktur Data|KO078N-Trisna Gelar Abdillah, S.T., M.Kom";
+    let shared_sig = format!("{shared_key}|07:00:00 s.d. 09:30:00");
+
+    let mk_seeded =
+        |date_str: &str, nama_mk: &str, key: &str, sig: &str, verification: ProofVerification| {
+            AttendanceProof {
+                proof_id: generate_proof_id(date_str, key, &format!("{date_str}T07:05:00+07:00")),
+                sig: sig.to_string(),
+                key: key.to_string(),
+                date: date_str.to_string(),
+                recorded_at: format!("{date_str}T07:05:00+07:00"),
+                verified_at: (verification == ProofVerification::PortalVerified)
+                    .then(|| format!("{date_str}T07:06:00+07:00")),
+                server_date_header: Some("Thu, 19 Nov 2026 00:05:00 GMT".to_string()),
+                verification,
+                nim: "251511001".to_string(),
+                student_nama: "Budi Santoso".to_string(),
+                jurusan: "D3-Teknik Informatika".to_string(),
+                nama_mk: nama_mk.to_string(),
+                mk_code: "25IF201".to_string(),
+                dosen: "KO078N-Trisna Gelar Abdillah, S.T., M.Kom".to_string(),
+                jam: "07:00:00 s.d. 09:30:00".to_string(),
+                tp: "T".to_string(),
+                ja: "1".to_string(),
+                jb: "3".to_string(),
+                kls: "1A".to_string(),
+                target_url: cfg.target_url.clone(),
+                endpoint_url: Some(format!("{}/ajar/absen/absensi_awal", server.base_url())),
+                http_status: Some(200),
+                server_response: Some("ok".to_string()),
+                server_button_label: (verification == ProofVerification::PortalVerified)
+                    .then(|| "Sudah Absen".to_string()),
+                attempt: Some(1),
+            }
+        };
+
+    // Seed yesterday's PostAccepted (same course/sig as today's JADWAL_GREEN_HTML)
+    // before an older PortalVerified record to verify oldest-to-newest sorting too.
+    let mut store = ProofStore::load(proof_path_for(&state_path));
+    assert!(store
+        .upsert_and_save(mk_seeded(
+            &yesterday_str,
+            "Struktur Data",
+            shared_key,
+            &shared_sig,
+            ProofVerification::PostAccepted,
+        ))
+        .unwrap());
+    assert!(store
+        .upsert_and_save(mk_seeded(
+            &two_days_ago_str,
+            "Basis Data",
+            "Basis Data|KO099N",
+            "Basis Data|KO099N|09:30:00 s.d. 11:30:00",
+            ProofVerification::PortalVerified,
+        ))
+        .unwrap());
+
+    server.mock(|when, then| {
+        when.method(POST).path("/laman/login");
+        then.status(200).body("ok");
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/ajar/absen");
+        then.status(200).body(JADWAL_GREEN_HTML);
+    });
+
+    let reporter = VecReporter::new();
+    let (_tx, rx) = mpsc::channel();
+    run(&cfg, &client, false, &reporter, &rx).unwrap();
+
+    let emitted_proofs: Vec<_> = reporter
+        .snapshot()
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::AttendanceProof(p) => Some(p),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(emitted_proofs.len(), 3);
+    // Startup emits retained history oldest-to-newest:
+    assert_eq!(emitted_proofs[0].date, two_days_ago_str);
+    assert_eq!(emitted_proofs[0].nama_mk, "Basis Data");
+    assert_eq!(
+        emitted_proofs[0].verification,
+        ProofVerification::PortalVerified
+    );
+
+    assert_eq!(emitted_proofs[1].date, yesterday_str);
+    assert_eq!(emitted_proofs[1].nama_mk, "Struktur Data");
+    assert_eq!(
+        emitted_proofs[1].verification,
+        ProofVerification::PostAccepted
+    );
+
+    // Today's green row for the same course must NOT upgrade yesterday's PostAccepted;
+    // it emits an ObservedPresent proof scoped to today.
+    assert_eq!(emitted_proofs[2].date, today_str);
+    assert_eq!(emitted_proofs[2].nama_mk, "Struktur Data");
+    assert_eq!(
+        emitted_proofs[2].verification,
+        ProofVerification::ObservedPresent
+    );
+
+    let reloaded = ProofStore::load(proof_path_for(&state_path));
+    assert_eq!(reloaded.len(), 2);
+    let yesterday_stored = reloaded.get_by_sig(&yesterday_str, &shared_sig).unwrap();
+    assert_eq!(
+        yesterday_stored.verification,
+        ProofVerification::PostAccepted
+    );
+    assert!(reloaded.get_by_sig(&today_str, &shared_sig).is_none());
+
+    let _ = std::fs::remove_dir_all(state_path.parent().unwrap());
+}
+
+#[test]
+fn portal_snapshot_emitted_in_run_once_and_verify_after_post_with_zero_extra_gets() {
+    // Part 1: Green page during initial login/run_once emits 1 snapshot with has_green_row = true and 1 GET hit.
+    {
+        let server = MockServer::start();
+        let state_path = temp_state_path("snapshot_green");
+        let cfg = test_config(&server.base_url(), state_path.clone());
+        let client = AbsenClient::new(&cfg.base_url).unwrap();
+
+        server.mock(|when, then| {
+            when.method(POST).path("/laman/login");
+            then.status(200).body("ok");
+        });
+        let m_get = server.mock(|when, then| {
+            when.method(GET).path("/ajar/absen");
+            then.status(200).body(JADWAL_GREEN_HTML);
+        });
+
+        let reporter = VecReporter::new();
+        let (_tx, rx) = mpsc::channel();
+        run(&cfg, &client, false, &reporter, &rx).unwrap();
+
+        m_get.assert_hits(1);
+        let snapshots: Vec<PortalPageSnapshot> = reporter
+            .snapshot()
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::PortalSnapshot(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].html, JADWAL_GREEN_HTML);
+        assert_eq!(snapshots[0].base_url, cfg.base_url);
+        assert_eq!(snapshots[0].target_url, cfg.target_url);
+        assert!(snapshots[0].has_green_row);
+        assert!(!snapshots[0].captured_at.is_empty());
+
+        let _ = std::fs::remove_dir_all(state_path.parent().unwrap());
+    }
+
+    // Part 2: Ambiguous POST triggers 1 verify_after_post GET (total 2 GETs) and emits 2 snapshots:
+    // first with has_green_row = false (blue HTML), second with has_green_row = true (green HTML).
+    {
+        let server = MockServer::start();
+        let state_path = temp_state_path("snapshot_verify");
+        let cfg = test_config(&server.base_url(), state_path.clone());
+        let client = AbsenClient::new(&cfg.base_url).unwrap();
+
+        server.mock(|when, then| {
+            when.method(POST).path("/laman/login");
+            then.status(200).body("ok");
+        });
+        let m_blue = server.mock(|when, then| {
+            when.method(GET).path("/ajar/absen");
+            then.status(200).body(JADWAL_ONE_BLUE_HTML);
+        });
+        let m_post = server.mock(|when, then| {
+            when.method(POST).path("/ajar/absen/absensi_awal");
+            then.status(200).body(r#"{"status":false}"#);
+        });
+
+        struct SwapToGreenSnapshot<'a> {
+            server: &'a MockServer,
+            m_blue: Mutex<Option<httpmock::Mock<'a>>>,
+            m_green: Mutex<Option<httpmock::Mock<'a>>>,
+            events: Mutex<Vec<Event>>,
+        }
+        impl<'a> Reporter for SwapToGreenSnapshot<'a> {
+            fn emit(&self, event: Event) {
+                if let Event::Log { code, message, .. } = &event {
+                    if code == "ABSEN" && message.starts_with("target:") {
+                        if let Some(mut m) = self.m_blue.lock().unwrap().take() {
+                            m.assert_hits(1);
+                            m.delete();
+                            let green = self.server.mock(|when, then| {
+                                when.method(GET).path("/ajar/absen");
+                                then.status(200).body(JADWAL_GREEN_HTML);
+                            });
+                            *self.m_green.lock().unwrap() = Some(green);
+                        }
+                    }
+                }
+                self.events.lock().unwrap().push(event);
+            }
+        }
+
+        let reporter = SwapToGreenSnapshot {
+            server: &server,
+            m_blue: Mutex::new(Some(m_blue)),
+            m_green: Mutex::new(None),
+            events: Mutex::new(Vec::new()),
+        };
+        let (_tx, rx) = mpsc::channel();
+        run(&cfg, &client, false, &reporter, &rx).unwrap();
+
+        m_post.assert_hits(1);
+        reporter
+            .m_green
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("green mock installed")
+            .assert_hits(1);
+
+        let snapshots: Vec<PortalPageSnapshot> = reporter
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                Event::PortalSnapshot(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(snapshots.len(), 2);
+
+        assert_eq!(snapshots[0].html, JADWAL_ONE_BLUE_HTML);
+        assert_eq!(snapshots[0].base_url, cfg.base_url);
+        assert_eq!(snapshots[0].target_url, cfg.target_url);
+        assert!(!snapshots[0].has_green_row);
+
+        assert_eq!(snapshots[1].html, JADWAL_GREEN_HTML);
+        assert_eq!(snapshots[1].base_url, cfg.base_url);
+        assert_eq!(snapshots[1].target_url, cfg.target_url);
+        assert!(snapshots[1].has_green_row);
+
+        let _ = std::fs::remove_dir_all(state_path.parent().unwrap());
+    }
 }

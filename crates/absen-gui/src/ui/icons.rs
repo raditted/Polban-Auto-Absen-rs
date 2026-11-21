@@ -366,6 +366,75 @@ pub fn draw_close(painter: &egui::Painter, rect: Rect, color: Color32) {
     painter.line_segment([r.right_top(), r.left_bottom()], stroke);
 }
 
+/// Draw two overlapping document rectangles representing clipboard copy inside `rect`.
+pub fn draw_copy(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let r = rect.shrink(rect.width().min(rect.height()) * 0.18);
+    let stroke = Stroke::new(1.4_f32, color);
+    let front = Rect::from_min_max(
+        Pos2::new(r.left() + r.width() * 0.24, r.top() + r.height() * 0.24),
+        r.max,
+    );
+    painter.rect_stroke(front, 1.5, stroke);
+    let back_pts = vec![
+        Pos2::new(r.left() + r.width() * 0.14, r.top() + r.height() * 0.72),
+        Pos2::new(r.left(), r.top() + r.height() * 0.72),
+        r.min,
+        Pos2::new(r.left() + r.width() * 0.72, r.top()),
+        Pos2::new(r.left() + r.width() * 0.72, r.top() + r.height() * 0.14),
+    ];
+    painter.add(egui::Shape::line(back_pts, stroke));
+}
+
+/// Draw an external link box + top-right arrow inside `rect`.
+pub fn draw_external_link(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let r = rect.shrink(rect.width().min(rect.height()) * 0.18);
+    let stroke = Stroke::new(1.4_f32, color);
+    let box_pts = vec![
+        Pos2::new(r.left() + r.width() * 0.45, r.top() + r.height() * 0.18),
+        Pos2::new(r.left(), r.top() + r.height() * 0.18),
+        r.left_bottom(),
+        Pos2::new(r.right() - r.width() * 0.18, r.bottom()),
+        Pos2::new(r.right() - r.width() * 0.18, r.top() + r.height() * 0.55),
+    ];
+    painter.add(egui::Shape::line(box_pts, stroke));
+    let tip = r.right_top();
+    painter.line_segment(
+        [
+            Pos2::new(
+                r.center().x - r.width() * 0.05,
+                r.center().y + r.height() * 0.05,
+            ),
+            tip,
+        ],
+        stroke,
+    );
+    painter.line_segment([Pos2::new(tip.x - r.width() * 0.34, tip.y), tip], stroke);
+    painter.line_segment([tip, Pos2::new(tip.x, tip.y + r.height() * 0.34)], stroke);
+}
+
+/// Draw a shield with a crisp checkmark inside `rect` (attendance proof icon).
+pub fn draw_shield_check(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let r = rect.shrink(rect.width().min(rect.height()) * 0.14);
+    let stroke = Stroke::new(1.5_f32, color);
+    let shield = vec![
+        Pos2::new(r.center().x, r.top()),
+        Pos2::new(r.right(), r.top() + r.height() * 0.18),
+        Pos2::new(r.right() - r.width() * 0.05, r.top() + r.height() * 0.56),
+        Pos2::new(r.center().x, r.bottom()),
+        Pos2::new(r.left() + r.width() * 0.05, r.top() + r.height() * 0.56),
+        Pos2::new(r.left(), r.top() + r.height() * 0.18),
+    ];
+    painter.add(egui::Shape::closed_line(shield, stroke));
+
+    let c0 = Pos2::new(
+        r.left() + r.width() * 0.28,
+        r.center().y + r.height() * 0.02,
+    );
+    let c1 = Pos2::new(r.left() + r.width() * 0.44, r.top() + r.height() * 0.65);
+    let c2 = Pos2::new(r.right() - r.width() * 0.27, r.top() + r.height() * 0.34);
+    painter.add(egui::Shape::line(vec![c0, c1, c2], stroke));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

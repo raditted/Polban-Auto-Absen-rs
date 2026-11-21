@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 
 use scraper::{ElementRef, Html, Selector};
 
-use crate::model::{AbsenFormData, Action, Color, Skip, UserInfo};
+use crate::model::{AbsenFormData, Action, Color, RowMeta, Skip, UserInfo};
 use crate::text::{collapse_whitespace, skip_reason};
 
 static SEL_USER_HEADER: LazyLock<Selector> =
@@ -143,17 +143,36 @@ fn td_text(tds: &[String], idx: usize) -> &str {
 
 /// Parse `table#jadwal` (or fallback first `table`) into `(actions, skips)`.
 pub fn find_rows(html: &str, absen_endpoint: &str) -> (Vec<Action>, Vec<Skip>) {
+    let (actions, skips, _) = find_rows_inner(html, absen_endpoint, false);
+    (actions, skips)
+}
+
+/// Parse `table#jadwal` (or fallback first `table`) into `(actions, skips, row_metas)`
+/// in a single DOM pass, preserving full metadata for skipped/green rows.
+pub fn find_rows_with_meta(
+    html: &str,
+    absen_endpoint: &str,
+) -> (Vec<Action>, Vec<Skip>, Vec<RowMeta>) {
+    find_rows_inner(html, absen_endpoint, true)
+}
+
+fn find_rows_inner(
+    html: &str,
+    absen_endpoint: &str,
+    collect_meta: bool,
+) -> (Vec<Action>, Vec<Skip>, Vec<RowMeta>) {
     let doc = Html::parse_document(html);
     let Some(table) = doc
         .select(&SEL_TABLE_JADWAL)
         .next()
         .or_else(|| doc.select(&SEL_TABLE).next())
     else {
-        return (Vec::new(), Vec::new());
+        return (Vec::new(), Vec::new(), Vec::new());
     };
 
     let mut actions = Vec::new();
     let mut skips = Vec::new();
+    let mut metas = Vec::new();
     let mut tds: Vec<String> = Vec::with_capacity(8);
 
     for row in table.select(&SEL_TR) {
@@ -192,6 +211,34 @@ pub fn find_rows(html: &str, absen_endpoint: &str) -> (Vec<Action>, Vec<Skip>) {
         let jb = td_text(&tds, 6);
         let jam = td_text(&tds, 7);
 
+        let kls = if collect_meta || (color == Color::Blue && !disabled) {
+            row.select(&SEL_INPUT_KLS)
+                .next()
+                .and_then(|inp| inp.value().attr("value"))
+                .map(|v| v.trim().to_string())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        if collect_meta {
+            metas.push(RowMeta {
+                color,
+                disabled,
+                sig: format!("{nama_mk}|{dosen}|{jam}"),
+                key: format!("{nama_mk}|{dosen}"),
+                btn_txt: btn_txt.clone(),
+                nama_mk: nama_mk.to_string(),
+                mk_code: mk_code.to_string(),
+                dosen: dosen.to_string(),
+                jam: jam.to_string(),
+                tp: tp.to_string(),
+                ja: ja.to_string(),
+                jb: jb.to_string(),
+                kls: kls.clone(),
+            });
+        }
+
         if color != Color::Blue {
             let reason = if disabled {
                 "disabled"
@@ -216,12 +263,6 @@ pub fn find_rows(html: &str, absen_endpoint: &str) -> (Vec<Action>, Vec<Skip>) {
         }
 
         let dsn = dosen.split('-').next().unwrap_or("").trim().to_string();
-        let kls = row
-            .select(&SEL_INPUT_KLS)
-            .next()
-            .and_then(|inp| inp.value().attr("value"))
-            .map(|v| v.trim().to_string())
-            .unwrap_or_default();
 
         actions.push(Action {
             sig: format!("{nama_mk}|{dosen}|{jam}"),
@@ -242,7 +283,7 @@ pub fn find_rows(html: &str, absen_endpoint: &str) -> (Vec<Action>, Vec<Skip>) {
         });
     }
 
-    (actions, skips)
+    (actions, skips, metas)
 }
 
 #[cfg(test)]

@@ -5,22 +5,130 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant};
 
-use crate::bridge::{EngineController, GuiSnapshot};
+use crate::bridge::{EngineController, GuiSnapshot, LivePreviewResult};
 use crate::credentials::{open_default_store, CredentialStore};
 use crate::icon::IconStatus;
 #[cfg(target_os = "windows")]
 use crate::platform::win32;
 use crate::platform::{AutostartManager, Notifier, TrayCommand, TrayManager};
 use crate::prefs::{self, AppPrefs, DotenvImportResult, PrefsError, ThemePreference};
+use crate::screenshot::{
+    default_screenshot_filename, render_sample_attendance_png, write_png_atomic, ScreenshotSource,
+};
 use crate::theme::{
     apply_appearance, configure_fonts, effective_dark_mode, AppearanceConfig, ThemeTokens,
 };
+use crate::ui::activity::ActivityAction;
 use crate::ui::header::HeaderAction;
 use crate::ui::jadwal::JadwalAction;
+use crate::ui::proof::{ProofAction, ProofScreenshotView};
 use crate::ui::settings::{OnboardingAction, SettingsAction, SettingsState};
-use crate::ui::{activity, header, jadwal, settings, CompactTab};
-use crate::updater::{UpdateManager, UpdateStatus};
+use crate::ui::{activity, header, jadwal, proof, settings, CompactTab};
+use crate::updater::{is_safe_http_url, open_url_in_browser, UpdateManager, UpdateStatus};
+
+struct LoadedProofTexture {
+    key: String,
+    revision: u64,
+    texture: egui::TextureHandle,
+    size: [usize; 2],
+    source_label: String,
+    png_bytes: Arc<Vec<u8>>,
+}
+
+struct ImgDecodeResult {
+    key: String,
+    revision: u64,
+    source_label: String,
+    png_bytes: Arc<Vec<u8>>,
+    image: Result<(egui::ColorImage, [usize; 2]), String>,
+}
+
+fn decode_png_rgba(png_bytes: &[u8]) -> Result<(egui::ColorImage, [usize; 2]), String> {
+    let dyn_img = image::load_from_memory_with_format(png_bytes, image::ImageFormat::Png)
+        .map_err(|e| format!("gagal membaca PNG: {e}"))?;
+    let rgba = dyn_img.to_rgba8();
+    let size = [rgba.width() as usize, rgba.height() as usize];
+    let pixels = rgba.into_raw();
+    Ok((
+        egui::ColorImage::from_rgba_unmultiplied(size, &pixels),
+        size,
+    ))
+}
+
+fn spawn_png_decode_bytes(
+    ctx: &egui::Context,
+    key: String,
+    revision: u64,
+    source_label: String,
+    png_bytes: Arc<Vec<u8>>,
+) -> Option<mpsc::Receiver<ImgDecodeResult>> {
+    let (tx, rx) = mpsc::channel();
+    let wake_ctx = ctx.clone();
+    std::thread::Builder::new()
+        .name("absen-img-decode".to_string())
+        .spawn(move || {
+            let image = decode_png_rgba(&png_bytes);
+            let _ = tx.send(ImgDecodeResult {
+                key,
+                revision,
+                source_label,
+                png_bytes,
+                image,
+            });
+            wake_ctx.request_repaint();
+        })
+        .ok()?;
+    Some(rx)
+}
+
+fn spawn_png_decode_from_path(
+    ctx: &egui::Context,
+    key: String,
+    revision: u64,
+    path: PathBuf,
+) -> Option<mpsc::Receiver<ImgDecodeResult>> {
+    let (tx, rx) = mpsc::channel();
+    let wake_ctx = ctx.clone();
+    std::thread::Builder::new()
+        .name("absen-img-decode".to_string())
+        .spawn(move || {
+            let (png_bytes, source_label, image) = match std::fs::read(&path) {
+                Ok(raw) => {
+                    let bytes = Arc::new(raw);
+                    match decode_png_rgba(&bytes) {
+                        Ok((img, size)) => {
+                            let label = if size[0] == 960 {
+                                ScreenshotSource::NativeFallback.badge_label().to_string()
+                            } else {
+                                ScreenshotSource::HeadlessBrowser.badge_label().to_string()
+                            };
+                            (bytes, label, Ok((img, size)))
+                        }
+                        Err(e) => (bytes, String::new(), Err(e)),
+                    }
+                }
+                Err(e) => (
+                    Arc::new(Vec::new()),
+                    String::new(),
+                    Err(format!("gagal membaca file PNG: {e}")),
+                ),
+            };
+            let _ = tx.send(ImgDecodeResult {
+                key,
+                revision,
+                source_label,
+                png_bytes,
+                image,
+            });
+            wake_ctx.request_repaint();
+        })
+        .ok()?;
+    Some(rx)
+}
+
+type SavePickResult = (Arc<Vec<u8>>, Option<PathBuf>);
 
 struct AppCore {
     prefs: AppPrefs,
@@ -31,6 +139,27 @@ struct AppCore {
     autostart: AutostartManager,
     settings: SettingsState,
     updater: UpdateManager,
+    proof_modal_open: bool,
+    proof_modal_key: Option<String>,
+    proof_sample_mode: bool,
+    proof_copy_feedback_until: Option<Instant>,
+    proof_tech_expanded: bool,
+    active_proof_texture: Option<LoadedProofTexture>,
+    proof_texture_loading: Option<(String, u64)>,
+    img_decode_rx: Option<mpsc::Receiver<ImgDecodeResult>>,
+    live_preview_rx: Option<mpsc::Receiver<LivePreviewResult>>,
+    live_preview_active: bool,
+    live_preview_capturing: bool,
+    live_preview_captured_at: Option<String>,
+    live_preview_error: Option<String>,
+    proof_image_zoom: bool,
+    save_pick_rx: Option<mpsc::Receiver<SavePickResult>>,
+    save_write_rx: Option<mpsc::Receiver<Result<PathBuf, String>>>,
+    proof_save_feedback_until: Option<Instant>,
+    proof_save_error: Option<String>,
+    test_save_path: Option<PathBuf>,
+    cached_proof_count: usize,
+    cached_proof_btn_label: String,
     compact_tab: CompactTab,
     start_minimized: bool,
     minimized_applied: bool,
@@ -104,10 +233,60 @@ impl AppCore {
     }
 
     fn open_settings(&mut self) {
+        self.close_proof_modal();
         self.settings.theme = self.prefs.theme;
         self.settings.light_preset = self.prefs.light_preset;
         self.settings.dark_preset = self.prefs.dark_preset;
         self.settings.open = true;
+    }
+
+    fn clear_proof_image_state(&mut self) {
+        self.active_proof_texture = None;
+        self.proof_texture_loading = None;
+        self.img_decode_rx = None;
+        self.live_preview_rx = None;
+        self.live_preview_active = false;
+        self.live_preview_capturing = false;
+        self.live_preview_captured_at = None;
+        self.live_preview_error = None;
+        self.proof_image_zoom = false;
+        self.proof_save_feedback_until = None;
+        self.proof_save_error = None;
+    }
+
+    fn open_proof_modal(&mut self, key: String) {
+        self.settings.open = false;
+        self.proof_modal_open = true;
+        self.proof_modal_key = Some(key);
+        self.proof_sample_mode = false;
+        self.proof_copy_feedback_until = None;
+        self.proof_tech_expanded = false;
+        self.clear_proof_image_state();
+    }
+
+    fn open_proofs_from_header(&mut self, snapshot: &GuiSnapshot) {
+        self.settings.open = false;
+        self.proof_modal_open = true;
+        self.proof_sample_mode = false;
+        self.proof_copy_feedback_until = None;
+        self.proof_tech_expanded = false;
+        self.clear_proof_image_state();
+        self.proof_modal_key = snapshot.proofs.first().map(|p| {
+            if !p.proof_id.is_empty() {
+                p.proof_id.clone()
+            } else {
+                p.sig.clone()
+            }
+        });
+    }
+
+    fn close_proof_modal(&mut self) {
+        self.proof_modal_open = false;
+        self.proof_modal_key = None;
+        self.proof_sample_mode = false;
+        self.proof_copy_feedback_until = None;
+        self.proof_tech_expanded = false;
+        self.clear_proof_image_state();
     }
 
     fn close_settings(&mut self, ctx: &egui::Context) {
@@ -240,7 +419,11 @@ impl AppCore {
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context, snapshot_active: bool) {
-        if self.settings.open
+        if self.proof_modal_open
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            self.close_proof_modal();
+        } else if self.settings.open
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
         {
             self.close_settings(ctx);
@@ -568,6 +751,242 @@ impl AppCore {
                 }
             }
         }
+
+        if let Some(rx) = &self.live_preview_rx {
+            match rx.try_recv() {
+                Ok(Ok((png_bytes, source, captured_at))) => {
+                    self.live_preview_rx = None;
+                    self.live_preview_capturing = false;
+                    self.live_preview_captured_at = Some(captured_at);
+                    self.live_preview_error = None;
+                    if self.proof_modal_open && self.live_preview_active {
+                        let key = "live-preview".to_string();
+                        self.proof_texture_loading = Some((key.clone(), 0));
+                        self.img_decode_rx = spawn_png_decode_bytes(
+                            ctx,
+                            key,
+                            0,
+                            source.badge_label().to_string(),
+                            Arc::new(png_bytes),
+                        );
+                    }
+                }
+                Ok(Err(err)) => {
+                    self.live_preview_rx = None;
+                    self.live_preview_capturing = false;
+                    self.live_preview_error = Some(err);
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.live_preview_rx = None;
+                    self.live_preview_capturing = false;
+                    self.live_preview_error =
+                        Some("Proses render pratinjau berhenti sebelum selesai.".to_string());
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+
+        if let Some(rx) = &self.img_decode_rx {
+            match rx.try_recv() {
+                Ok(decoded) => {
+                    self.img_decode_rx = None;
+                    let still_wanted = self.proof_modal_open
+                        && self.proof_texture_loading.as_ref()
+                            == Some(&(decoded.key.clone(), decoded.revision));
+                    if still_wanted {
+                        match decoded.image {
+                            Ok((color_img, size)) => {
+                                let texture = ctx.load_texture(
+                                    &decoded.key,
+                                    color_img,
+                                    egui::TextureOptions::LINEAR,
+                                );
+                                self.active_proof_texture = Some(LoadedProofTexture {
+                                    key: decoded.key,
+                                    revision: decoded.revision,
+                                    texture,
+                                    size,
+                                    source_label: decoded.source_label,
+                                    png_bytes: decoded.png_bytes,
+                                });
+                            }
+                            Err(err) => {
+                                if self.live_preview_active {
+                                    self.live_preview_error = Some(err);
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.img_decode_rx = None;
+                    self.proof_texture_loading = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+
+        if let Some(rx) = &self.save_pick_rx {
+            match rx.try_recv() {
+                Ok((bytes, Some(dest_path))) => {
+                    self.save_pick_rx = None;
+                    self.spawn_proof_image_write(ctx, bytes, dest_path);
+                }
+                Ok((_, None)) | Err(mpsc::TryRecvError::Disconnected) => {
+                    self.save_pick_rx = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+
+        if let Some(rx) = &self.save_write_rx {
+            match rx.try_recv() {
+                Ok(Ok(_path)) => {
+                    self.save_write_rx = None;
+                    let duration = Duration::from_secs(3);
+                    self.proof_save_feedback_until = Some(Instant::now() + duration);
+                    self.proof_save_error = None;
+                    ctx.request_repaint_after(duration);
+                }
+                Ok(Err(err)) => {
+                    self.save_write_rx = None;
+                    self.proof_save_error = Some(err);
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.save_write_rx = None;
+                    self.proof_save_error =
+                        Some("Proses penyimpanan gambar berhenti sebelum selesai.".to_string());
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+    }
+
+    fn spawn_proof_image_write(
+        &mut self,
+        ctx: &egui::Context,
+        bytes: Arc<Vec<u8>>,
+        dest_path: PathBuf,
+    ) {
+        let (tx, rx) = mpsc::channel();
+        let wake_ctx = ctx.clone();
+        match std::thread::Builder::new()
+            .name("polban-shot-save-write".to_string())
+            .spawn(move || {
+                let res = write_png_atomic(&dest_path, &bytes).map(|()| dest_path);
+                let _ = tx.send(res);
+                wake_ctx.request_repaint();
+            }) {
+            Ok(_) => {
+                self.save_write_rx = Some(rx);
+                self.proof_save_error = None;
+            }
+            Err(err) => {
+                self.proof_save_error = Some(format!("Gagal memulai thread penyimpanan: {err}"));
+            }
+        }
+    }
+
+    fn handle_save_proof_image(&mut self, ctx: &egui::Context, default_filename: String) {
+        if self.proof_sample_mode || self.save_pick_rx.is_some() || self.save_write_rx.is_some() {
+            return;
+        }
+        let Some(tex) = &self.active_proof_texture else {
+            return;
+        };
+        let bytes = Arc::clone(&tex.png_bytes);
+        self.proof_save_error = None;
+
+        if let Some(dest) = self.test_save_path.clone() {
+            self.spawn_proof_image_write(ctx, bytes, dest);
+            return;
+        }
+        if self.headless {
+            return;
+        }
+
+        let (tx, rx) = mpsc::channel();
+        let wake_ctx = ctx.clone();
+        match std::thread::Builder::new()
+            .name("polban-shot-save-picker".to_string())
+            .spawn(move || {
+                let path = prefs::pick_proof_image_save_path(&default_filename);
+                let _ = tx.send((bytes, path));
+                wake_ctx.request_repaint();
+            }) {
+            Ok(_) => self.save_pick_rx = Some(rx),
+            Err(err) => {
+                self.proof_save_error =
+                    Some(format!("Gagal membuka dialog penyimpanan gambar: {err}"));
+            }
+        }
+    }
+
+    fn ensure_proof_texture_loaded(&mut self, ctx: &egui::Context, snapshot: &GuiSnapshot) {
+        if !self.proof_modal_open {
+            if self.active_proof_texture.is_some() {
+                self.active_proof_texture = None;
+            }
+            return;
+        }
+
+        if !snapshot.proofs.is_empty() {
+            let active = self
+                .proof_modal_key
+                .as_deref()
+                .and_then(|k| snapshot.proof_by_key(k))
+                .or_else(|| snapshot.proofs.first());
+            let Some(proof) = active else {
+                return;
+            };
+            let target_key = format!("proof:{}", proof.proof_id);
+            let rev = snapshot.screenshot_revision;
+            if self
+                .active_proof_texture
+                .as_ref()
+                .is_some_and(|t| t.key == target_key && t.revision == rev)
+            {
+                return;
+            }
+            if self.proof_texture_loading.as_ref() == Some(&(target_key.clone(), rev)) {
+                return;
+            }
+            self.active_proof_texture = None;
+            if snapshot.capturing_proof_id.as_deref() == Some(proof.proof_id.as_str()) {
+                return;
+            }
+            let png_path = self.controller.screenshot_path_for(&proof.proof_id);
+            if png_path.is_file() {
+                self.proof_texture_loading = Some((target_key.clone(), rev));
+                self.img_decode_rx = spawn_png_decode_from_path(ctx, target_key, rev, png_path);
+            } else {
+                self.proof_texture_loading = None;
+            }
+        } else if self.proof_sample_mode {
+            let target_key = "sample".to_string();
+            if self
+                .active_proof_texture
+                .as_ref()
+                .is_some_and(|t| t.key == target_key)
+            {
+                return;
+            }
+            if self.proof_texture_loading.as_ref() == Some(&(target_key.clone(), 0)) {
+                return;
+            }
+            self.active_proof_texture = None;
+            self.proof_texture_loading = Some((target_key.clone(), 0));
+            let bytes = Arc::new(render_sample_attendance_png().to_vec());
+            self.img_decode_rx = spawn_png_decode_bytes(
+                ctx,
+                target_key,
+                0,
+                ScreenshotSource::NativeFallback.badge_label().to_string(),
+                bytes,
+            );
+        } else if !self.live_preview_active && self.active_proof_texture.is_some() {
+            self.active_proof_texture = None;
+        }
     }
 
     fn save_onboarding_and_start(&mut self, ctx: &egui::Context) {
@@ -670,6 +1089,15 @@ impl AppCore {
         let palette = apply_appearance(ctx, self.active_appearance());
         let is_dark = palette.dark_mode;
         let snapshot = self.current_snapshot();
+        let proof_count = snapshot.proofs.len();
+        if proof_count != self.cached_proof_count {
+            self.cached_proof_count = proof_count;
+            self.cached_proof_btn_label = if proof_count == 0 {
+                "Bukti".to_string()
+            } else {
+                format!("Bukti ({proof_count})")
+            };
+        }
         self.handle_shortcuts(ctx, snapshot.status.is_active());
         if self.quit_requested {
             return;
@@ -713,6 +1141,7 @@ impl AppCore {
                         palette,
                         width,
                         &self.updater.status,
+                        &self.cached_proof_btn_label,
                     ) {
                         match action {
                             HeaderAction::StartMonitoring => self.handle_start_monitoring(ctx),
@@ -720,6 +1149,7 @@ impl AppCore {
                             HeaderAction::ScanNow => {
                                 let _ = self.controller.scan_now();
                             }
+                            HeaderAction::OpenProofs => self.open_proofs_from_header(&snapshot),
                             HeaderAction::OpenSettings => self.open_settings(),
                             HeaderAction::CycleTheme => self.toggle_theme(ctx),
                             HeaderAction::StartUpdate => self.updater.start_download(ctx),
@@ -756,6 +1186,7 @@ impl AppCore {
                     }
 
                     let mut jadwal_action = None;
+                    let mut activity_action = None;
                     if width >= ThemeTokens::BREAKPOINT_WIDE {
                         let gutter = ThemeTokens::SPACE_LG;
                         let left_w = (width - gutter) * 0.60;
@@ -773,7 +1204,7 @@ impl AppCore {
                             jadwal_action = jadwal::show(ui, &snapshot, palette, false, true);
                         });
                         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(right_rect), |ui| {
-                            activity::show(ui, &snapshot, palette, false, true);
+                            activity_action = activity::show(ui, &snapshot, palette, false, true);
                         });
                     } else {
                         let compact = width < ThemeTokens::BREAKPOINT_MEDIUM;
@@ -783,7 +1214,8 @@ impl AppCore {
                                 jadwal_action =
                                     jadwal::show(ui, &snapshot, palette, compact, false);
                                 ui.add_space(ThemeTokens::SPACE_LG);
-                                activity::show(ui, &snapshot, palette, compact, false);
+                                activity_action =
+                                    activity::show(ui, &snapshot, palette, compact, false);
                             });
                     }
 
@@ -796,10 +1228,204 @@ impl AppCore {
                             JadwalAction::ScanNow => {
                                 let _ = self.controller.scan_now();
                             }
+                            JadwalAction::OpenProof(key) => {
+                                self.open_proof_modal(key);
+                            }
                         }
+                    }
+
+                    if let Some(ActivityAction::OpenProof(key)) = activity_action {
+                        self.open_proof_modal(key);
                     }
                 });
             });
+
+        let copy_feedback_active = if let Some(until) = self.proof_copy_feedback_until {
+            let now = Instant::now();
+            if now >= until {
+                self.proof_copy_feedback_until = None;
+                false
+            } else {
+                ctx.request_repaint_after(until.saturating_duration_since(now));
+                true
+            }
+        } else {
+            false
+        };
+
+        let save_feedback_active = if let Some(until) = self.proof_save_feedback_until {
+            let now = Instant::now();
+            if now >= until {
+                self.proof_save_feedback_until = None;
+                false
+            } else {
+                ctx.request_repaint_after(until.saturating_duration_since(now));
+                true
+            }
+        } else {
+            false
+        };
+
+        if self.proof_modal_open {
+            if !snapshot.proofs.is_empty() {
+                self.proof_sample_mode = false;
+                self.live_preview_active = false;
+                let valid_key = self
+                    .proof_modal_key
+                    .as_deref()
+                    .is_some_and(|k| snapshot.proof_by_key(k).is_some());
+                if !valid_key {
+                    self.proof_modal_key = snapshot.proofs.first().map(|p| {
+                        if !p.proof_id.is_empty() {
+                            p.proof_id.clone()
+                        } else {
+                            p.sig.clone()
+                        }
+                    });
+                }
+            } else {
+                self.proof_modal_key = None;
+            }
+
+            self.ensure_proof_texture_loaded(ctx, &snapshot);
+
+            let active_proof_for_shot = if !snapshot.proofs.is_empty() {
+                self.proof_modal_key
+                    .as_deref()
+                    .and_then(|k| snapshot.proof_by_key(k))
+                    .or_else(|| snapshot.proofs.first())
+            } else {
+                None
+            };
+            let is_capturing_shot = if let Some(p) = active_proof_for_shot {
+                snapshot.capturing_proof_id.as_deref() == Some(p.proof_id.as_str())
+            } else {
+                self.live_preview_capturing
+            };
+            let shot_view = ProofScreenshotView {
+                texture: self.active_proof_texture.as_ref().map(|t| &t.texture),
+                pixel_size: self.active_proof_texture.as_ref().map(|t| t.size),
+                source_label: self
+                    .active_proof_texture
+                    .as_ref()
+                    .map(|t| t.source_label.as_str()),
+                is_capturing: is_capturing_shot,
+                zoomed: self.proof_image_zoom,
+                live_preview_active: self.live_preview_active,
+                live_captured_at: self.live_preview_captured_at.as_deref(),
+                live_error: self.live_preview_error.as_deref(),
+                save_in_progress: self.save_pick_rx.is_some() || self.save_write_rx.is_some(),
+                save_feedback_active,
+                save_error: self.proof_save_error.as_deref(),
+                can_save_image: !self.proof_sample_mode && self.active_proof_texture.is_some(),
+            };
+
+            if let Some(action) = proof::show(
+                ctx,
+                &snapshot,
+                self.proof_modal_open,
+                self.proof_modal_key.as_deref(),
+                self.proof_sample_mode,
+                copy_feedback_active,
+                self.proof_tech_expanded,
+                &shot_view,
+                palette,
+            ) {
+                match action {
+                    ProofAction::Close => self.close_proof_modal(),
+                    ProofAction::SelectIndex(idx) => {
+                        if let Some(target) = snapshot.proofs.get(idx) {
+                            let next_key = if !target.proof_id.is_empty() {
+                                target.proof_id.clone()
+                            } else {
+                                target.sig.clone()
+                            };
+                            if self.proof_modal_key.as_deref() != Some(next_key.as_str()) {
+                                self.proof_modal_key = Some(next_key);
+                                self.proof_copy_feedback_until = None;
+                                self.clear_proof_image_state();
+                            }
+                        }
+                    }
+                    ProofAction::CopyReceipt => {
+                        if !self.proof_sample_mode {
+                            if let Some(p) = self
+                                .proof_modal_key
+                                .as_deref()
+                                .and_then(|k| snapshot.proof_by_key(k))
+                            {
+                                ctx.copy_text(p.receipt_text.clone());
+                                let duration = Duration::from_secs(2);
+                                self.proof_copy_feedback_until = Some(Instant::now() + duration);
+                                ctx.request_repaint_after(duration);
+                            }
+                        }
+                    }
+                    ProofAction::SaveImage => {
+                        let default_name = if let Some(p) = active_proof_for_shot {
+                            default_screenshot_filename(Some(&p.nama_mk), &p.date)
+                        } else {
+                            default_screenshot_filename(None, &snapshot.today_date)
+                        };
+                        self.handle_save_proof_image(ctx, default_name);
+                    }
+                    ProofAction::CaptureProofScreenshot(proof_id) => {
+                        self.active_proof_texture = None;
+                        self.proof_texture_loading = None;
+                        self.controller.request_proof_screenshot(proof_id);
+                    }
+                    ProofAction::CaptureLivePortalPreview => {
+                        self.proof_sample_mode = false;
+                        self.live_preview_active = true;
+                        self.live_preview_error = None;
+                        self.active_proof_texture = None;
+                        self.proof_texture_loading = None;
+                        self.proof_save_error = None;
+                        if let Some(rx) = self.controller.request_live_portal_preview() {
+                            self.live_preview_capturing = true;
+                            self.live_preview_rx = Some(rx);
+                        } else {
+                            self.live_preview_capturing = false;
+                            self.live_preview_error = Some(
+                                "Snapshot HTML portal belum tersedia dari siklus pemantauan."
+                                    .to_string(),
+                            );
+                        }
+                    }
+                    ProofAction::ExitLivePortalPreview => {
+                        self.clear_proof_image_state();
+                    }
+                    ProofAction::ToggleImageZoom => {
+                        self.proof_image_zoom = !self.proof_image_zoom;
+                    }
+                    ProofAction::Reverify => {
+                        let _ = self.controller.scan_now();
+                    }
+                    ProofAction::OpenPortal(url) => {
+                        if !self.proof_sample_mode && !self.headless && is_safe_http_url(&url) {
+                            std::thread::spawn(move || {
+                                let _ = open_url_in_browser(&url);
+                            });
+                        }
+                    }
+                    ProofAction::ToggleTechnical => {
+                        self.proof_tech_expanded = !self.proof_tech_expanded;
+                    }
+                    ProofAction::EnterSamplePreview => {
+                        self.clear_proof_image_state();
+                        self.proof_sample_mode = true;
+                        self.proof_tech_expanded = false;
+                        self.proof_copy_feedback_until = None;
+                    }
+                    ProofAction::ExitSamplePreview => {
+                        self.clear_proof_image_state();
+                        self.proof_sample_mode = false;
+                        self.proof_tech_expanded = false;
+                        self.proof_copy_feedback_until = None;
+                    }
+                }
+            }
+        }
 
         let backend = self.creds.backend();
         if let Some(action) = settings::show(
@@ -883,6 +1509,21 @@ impl DesktopApp {
 
         let mut controller = EngineController::new();
         controller.set_notifier(notifier.clone());
+        let shot_wake_ctx = cc.egui_ctx.clone();
+        controller.set_wake_ui(Some(Arc::new(move || {
+            shot_wake_ctx.request_repaint();
+        })));
+        let state_file = prefs
+            .state_file
+            .clone()
+            .unwrap_or_else(prefs::default_state_file_path);
+        controller.preload_proofs(&state_file);
+        let initial_proof_count = controller.snapshot().proofs.len();
+        let initial_proof_btn_label = if initial_proof_count == 0 {
+            "Bukti".to_string()
+        } else {
+            format!("Bukti ({initial_proof_count})")
+        };
         if start_minimized && tray.is_some() {
             controller.set_window_visible(false);
         }
@@ -899,6 +1540,27 @@ impl DesktopApp {
             autostart,
             settings,
             updater: UpdateManager::new(),
+            proof_modal_open: false,
+            proof_modal_key: None,
+            proof_sample_mode: false,
+            proof_copy_feedback_until: None,
+            proof_tech_expanded: false,
+            active_proof_texture: None,
+            proof_texture_loading: None,
+            img_decode_rx: None,
+            live_preview_rx: None,
+            live_preview_active: false,
+            live_preview_capturing: false,
+            live_preview_captured_at: None,
+            live_preview_error: None,
+            proof_image_zoom: false,
+            save_pick_rx: None,
+            save_write_rx: None,
+            proof_save_feedback_until: None,
+            proof_save_error: None,
+            test_save_path: None,
+            cached_proof_count: initial_proof_count,
+            cached_proof_btn_label: initial_proof_btn_label,
             compact_tab: CompactTab::Jadwal,
             start_minimized,
             minimized_applied: false,
@@ -1018,6 +1680,9 @@ impl DesktopApp {
         let autostart = AutostartManager::new("Polban Presensi");
         let mut controller = EngineController::new();
         controller.set_notifier(notifier.clone());
+        if let Some(sf) = &prefs.state_file {
+            controller.set_screenshot_state_file(sf);
+        }
 
         let core = Rc::new(RefCell::new(AppCore {
             prefs,
@@ -1028,6 +1693,27 @@ impl DesktopApp {
             autostart,
             settings,
             updater: UpdateManager::new(),
+            proof_modal_open: false,
+            proof_modal_key: None,
+            proof_sample_mode: false,
+            proof_copy_feedback_until: None,
+            proof_tech_expanded: false,
+            active_proof_texture: None,
+            proof_texture_loading: None,
+            img_decode_rx: None,
+            live_preview_rx: None,
+            live_preview_active: false,
+            live_preview_capturing: false,
+            live_preview_captured_at: None,
+            live_preview_error: None,
+            proof_image_zoom: false,
+            save_pick_rx: None,
+            save_write_rx: None,
+            proof_save_feedback_until: None,
+            proof_save_error: None,
+            test_save_path: None,
+            cached_proof_count: 0,
+            cached_proof_btn_label: "Bukti".to_string(),
             compact_tab: CompactTab::Jadwal,
             start_minimized: false,
             minimized_applied: true,
@@ -1098,6 +1784,52 @@ impl DesktopApp {
 
     pub fn is_settings_open(&self) -> bool {
         self.core.borrow().settings.open
+    }
+
+    pub fn is_proof_modal_open(&self) -> bool {
+        self.core.borrow().proof_modal_open
+    }
+
+    pub fn is_proof_sample_mode(&self) -> bool {
+        self.core.borrow().proof_sample_mode
+    }
+
+    pub fn proof_modal_key(&self) -> Option<String> {
+        self.core.borrow().proof_modal_key.clone()
+    }
+
+    pub fn is_proof_tech_expanded(&self) -> bool {
+        self.core.borrow().proof_tech_expanded
+    }
+
+    /// Configure a deterministic destination PNG path for headless save-image tests.
+    pub fn set_test_save_path(&mut self, path: Option<PathBuf>) {
+        self.core.borrow_mut().test_save_path = path;
+    }
+
+    /// Returns whether a GPU screenshot texture is currently loaded for the open proof modal.
+    pub fn has_loaded_proof_texture(&self) -> bool {
+        self.core.borrow().active_proof_texture.is_some()
+    }
+
+    /// Returns whether the screenshot preview inside the proof modal is zoomed in.
+    pub fn is_proof_image_zoomed(&self) -> bool {
+        self.core.borrow().proof_image_zoom
+    }
+
+    /// Returns whether the live portal preview mode is active inside the proof modal.
+    pub fn is_live_preview_active(&self) -> bool {
+        self.core.borrow().live_preview_active
+    }
+
+    /// Access the underlying `EngineController` in integration tests.
+    pub fn controller(&self) -> Ref<'_, EngineController> {
+        Ref::map(self.core.borrow(), |c| &c.controller)
+    }
+
+    /// Mutably access the underlying `EngineController` in integration tests.
+    pub fn controller_mut(&mut self) -> std::cell::RefMut<'_, EngineController> {
+        std::cell::RefMut::map(self.core.borrow_mut(), |c| &mut c.controller)
     }
 
     pub fn prefs(&self) -> Ref<'_, AppPrefs> {

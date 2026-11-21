@@ -623,7 +623,7 @@ impl ThemeTokens {
 
     pub const MAX_CONTAINER_WIDTH: f32 = 1280.0;
     pub const BREAKPOINT_WIDE: f32 = 860.0;
-    pub const BREAKPOINT_HEADER_STACK: f32 = 820.0;
+    pub const BREAKPOINT_HEADER_STACK: f32 = 880.0;
     pub const BREAKPOINT_MEDIUM: f32 = 600.0;
 
     pub const FONT_SEMIBOLD_FAMILY: &'static str = "semibold";

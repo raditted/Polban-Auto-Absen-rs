@@ -17,6 +17,10 @@ pub enum ScrollAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UserAction {
     Scroll(ScrollAction),
+    ToggleProof,
+    CloseProof,
+    PrevProof,
+    NextProof,
     Quit,
 }
 
@@ -34,6 +38,21 @@ pub fn map_crossterm_event(ev: &CrosstermEvent) -> Option<UserAction> {
             }
             if key.modifiers.is_empty() && key.code == KeyCode::Char('q') {
                 return Some(UserAction::Quit);
+            }
+            if key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            {
+                return None;
+            }
+            match key.code {
+                KeyCode::Char('p') | KeyCode::Char('P') | KeyCode::Enter => {
+                    return Some(UserAction::ToggleProof);
+                }
+                KeyCode::Esc => return Some(UserAction::CloseProof),
+                KeyCode::Left | KeyCode::Char('[') => return Some(UserAction::PrevProof),
+                KeyCode::Right | KeyCode::Char(']') => return Some(UserAction::NextProof),
+                _ => {}
             }
             let scroll = match key.code {
                 KeyCode::Up | KeyCode::Char('k') => ScrollAction::Up,
@@ -118,6 +137,45 @@ mod tests {
         assert_eq!(
             map_crossterm_event(&wheel_up),
             Some(UserAction::Scroll(ScrollAction::Up))
+        );
+    }
+
+    #[test]
+    fn maps_proof_overlay_keys() {
+        let cases = [
+            (
+                KeyCode::Char('p'),
+                KeyModifiers::NONE,
+                UserAction::ToggleProof,
+            ),
+            (
+                KeyCode::Char('P'),
+                KeyModifiers::SHIFT,
+                UserAction::ToggleProof,
+            ),
+            (KeyCode::Enter, KeyModifiers::NONE, UserAction::ToggleProof),
+            (KeyCode::Esc, KeyModifiers::NONE, UserAction::CloseProof),
+            (KeyCode::Left, KeyModifiers::NONE, UserAction::PrevProof),
+            (
+                KeyCode::Char('['),
+                KeyModifiers::NONE,
+                UserAction::PrevProof,
+            ),
+            (KeyCode::Right, KeyModifiers::NONE, UserAction::NextProof),
+            (
+                KeyCode::Char(']'),
+                KeyModifiers::NONE,
+                UserAction::NextProof,
+            ),
+        ];
+        for (code, mods, expected) in cases {
+            assert_eq!(map_crossterm_event(&key(code, mods)), Some(expected));
+        }
+
+        // Ctrl+p should not trigger ToggleProof
+        assert_eq!(
+            map_crossterm_event(&key(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+            None
         );
     }
 }

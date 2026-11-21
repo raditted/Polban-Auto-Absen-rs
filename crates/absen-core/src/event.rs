@@ -2,10 +2,11 @@
 
 use std::sync::{mpsc, Arc, Mutex};
 
-use crate::model::{Action, LogLevel, Skip, UserInfo};
+use crate::model::{Action, AttendanceProof, LogLevel, PortalPageSnapshot, Skip, UserInfo};
 
 /// Events emitted by the attendance engine to any UI/plain/test reporter.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum Event {
     Log {
         code: String,
@@ -29,6 +30,8 @@ pub enum Event {
         success: bool,
         nama: String,
     },
+    AttendanceProof(AttendanceProof),
+    PortalSnapshot(PortalPageSnapshot),
     Countdown(u32),
 }
 

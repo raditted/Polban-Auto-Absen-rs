@@ -8,12 +8,15 @@ use chrono::Local;
 use rand::Rng;
 use thiserror::Error;
 
-use crate::client::{AbsenClient, ClientError, LoginOutcome};
+use crate::client::{AbsenClient, ClientError, LoginOutcome, PostResponse};
 use crate::config::Config;
 use crate::event::{Event, Reporter};
-use crate::model::{Action, Color, LogLevel, Skip};
-use crate::parser::{find_rows, is_login_page, parse_user_header};
-use crate::state::ClickedState;
+use crate::model::{
+    generate_proof_id, sanitize_server_response, Action, AttendanceProof, Color, LogLevel,
+    PortalPageSnapshot, ProofVerification, RowMeta, Skip, UserInfo,
+};
+use crate::parser::{find_rows_with_meta, is_login_page, parse_user_header};
+use crate::state::{proof_path_for, ClickedState, ProofStore};
 
 const FAILURE_MARKERS: [&[u8]; 8] = [
     b"gagal",
@@ -308,17 +311,225 @@ fn perform_login(
     }
 }
 
-fn still_blue(client: &AbsenClient, cfg: &Config, action: &Action) -> bool {
+enum VerifyOutcome {
+    StillBlue,
+    Confirmed {
+        actions: Vec<Action>,
+        skips: Vec<Skip>,
+        green_btn_label: Option<String>,
+        html: String,
+    },
+}
+
+fn verify_after_post(client: &AbsenClient, cfg: &Config, action: &Action) -> VerifyOutcome {
     let Ok((_url, html)) = client.get_target(cfg) else {
-        return true;
+        return VerifyOutcome::StillBlue;
     };
     if is_login_page(&html) {
-        return true;
+        return VerifyOutcome::StillBlue;
     }
-    let (actions, _) = find_rows(&html, &cfg.absen_endpoint());
-    actions
+    let (actions, skips, metas) = find_rows_with_meta(&html, &cfg.absen_endpoint());
+    if actions
         .iter()
         .any(|a| a.key == action.key || a.sig.starts_with(&action.key))
+    {
+        return VerifyOutcome::StillBlue;
+    }
+    let green_btn_label = metas
+        .iter()
+        .find(|m| m.color == Color::Green && m.sig == action.sig)
+        .or_else(|| {
+            metas
+                .iter()
+                .find(|m| m.color == Color::Green && m.key == action.key)
+        })
+        .and_then(|m| non_empty(&m.btn_txt));
+    VerifyOutcome::Confirmed {
+        actions,
+        skips,
+        green_btn_label,
+        html,
+    }
+}
+
+fn non_empty(s: &str) -> Option<String> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+struct EngineContext<'a> {
+    clicked: &'a mut ClickedState,
+    proofs: &'a mut ProofStore,
+    observed_proofs: &'a mut HashSet<String>,
+    tracker: &'a mut JadwalTracker,
+    user_info: &'a UserInfo,
+}
+
+fn build_proof_from_action(
+    action: &Action,
+    user_info: &UserInfo,
+    cfg: &Config,
+    resp: &PostResponse,
+    attempt: u32,
+    verification: ProofVerification,
+    server_button_label: Option<String>,
+) -> AttendanceProof {
+    let now = Local::now();
+    let date = now.format("%Y-%m-%d").to_string();
+    let now_rfc = now.to_rfc3339();
+    let verified_at = if verification == ProofVerification::PortalVerified {
+        Some(now_rfc.clone())
+    } else {
+        None
+    };
+    AttendanceProof {
+        proof_id: generate_proof_id(&date, &action.key, &now_rfc),
+        sig: action.sig.clone(),
+        key: action.key.clone(),
+        date,
+        recorded_at: now_rfc,
+        verified_at,
+        server_date_header: resp.server_date.clone(),
+        verification,
+        nim: user_info.nim.clone(),
+        student_nama: user_info.nama.clone(),
+        jurusan: user_info.jurusan.clone(),
+        nama_mk: action.nama_mk.clone(),
+        mk_code: action.data.mk.clone(),
+        dosen: action.dosen.clone(),
+        jam: action.jam.clone(),
+        tp: action.data.tp.clone(),
+        ja: action.data.ja.clone(),
+        jb: action.data.jb.clone(),
+        kls: action.data.kls.clone(),
+        target_url: cfg.target_url.clone(),
+        endpoint_url: Some(action.url.clone()),
+        http_status: Some(resp.status),
+        server_response: sanitize_server_response(&resp.body),
+        server_button_label,
+        attempt: Some(attempt),
+    }
+}
+
+fn build_proof_from_row_meta(
+    meta: &RowMeta,
+    user_info: &UserInfo,
+    cfg: &Config,
+    verification: ProofVerification,
+) -> AttendanceProof {
+    let now = Local::now();
+    let date = now.format("%Y-%m-%d").to_string();
+    let now_rfc = now.to_rfc3339();
+    AttendanceProof {
+        proof_id: generate_proof_id(&date, &meta.key, &now_rfc),
+        sig: meta.sig.clone(),
+        key: meta.key.clone(),
+        date,
+        recorded_at: now_rfc.clone(),
+        verified_at: Some(now_rfc),
+        server_date_header: None,
+        verification,
+        nim: user_info.nim.clone(),
+        student_nama: user_info.nama.clone(),
+        jurusan: user_info.jurusan.clone(),
+        nama_mk: meta.nama_mk.clone(),
+        mk_code: meta.mk_code.clone(),
+        dosen: meta.dosen.clone(),
+        jam: meta.jam.clone(),
+        tp: meta.tp.clone(),
+        ja: meta.ja.clone(),
+        jb: meta.jb.clone(),
+        kls: meta.kls.clone(),
+        target_url: cfg.target_url.clone(),
+        endpoint_url: None,
+        http_status: None,
+        server_response: None,
+        server_button_label: non_empty(&meta.btn_txt),
+        attempt: None,
+    }
+}
+
+fn persist_and_emit_proof(
+    proof: AttendanceProof,
+    proofs: &mut ProofStore,
+    reporter: &dyn Reporter,
+) {
+    let date = proof.date.clone();
+    let sig = proof.sig.clone();
+    match proofs.upsert_and_save(proof.clone()) {
+        Ok(true) => {
+            let to_emit = proofs.get_by_sig(&date, &sig).cloned().unwrap_or(proof);
+            reporter.emit(Event::AttendanceProof(to_emit));
+        }
+        Ok(false) => {}
+        Err(e) => {
+            emit_log(
+                reporter,
+                "STATE",
+                format!("gagal simpan bukti: {e}"),
+                LogLevel::Warn,
+            );
+            reporter.emit(Event::AttendanceProof(proof));
+        }
+    }
+}
+
+fn process_green_rows(
+    cfg: &Config,
+    row_metas: &[RowMeta],
+    ctx: &mut EngineContext<'_>,
+    reporter: &dyn Reporter,
+) {
+    let today = Local::now().date_naive();
+    let today_str = today.format("%Y-%m-%d").to_string();
+
+    for meta in row_metas {
+        if meta.color != Color::Green {
+            continue;
+        }
+        if let Some(existing) = ctx.proofs.get_by_sig(&today_str, &meta.sig) {
+            if existing.verification == ProofVerification::PostAccepted {
+                let upgraded = build_proof_from_row_meta(
+                    meta,
+                    ctx.user_info,
+                    cfg,
+                    ProofVerification::PortalVerified,
+                );
+                match ctx.proofs.upsert_and_save_for_date(upgraded, today) {
+                    Ok(true) => {
+                        if let Some(stored) = ctx.proofs.get_by_sig(&today_str, &meta.sig) {
+                            reporter.emit(Event::AttendanceProof(stored.clone()));
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        emit_log(
+                            reporter,
+                            "STATE",
+                            format!("gagal update bukti: {e}"),
+                            LogLevel::Warn,
+                        );
+                    }
+                }
+            }
+            continue;
+        }
+
+        let obs_key = format!("{today_str}|{}", meta.sig);
+        if ctx.observed_proofs.insert(obs_key) {
+            let proof = build_proof_from_row_meta(
+                meta,
+                ctx.user_info,
+                cfg,
+                ProofVerification::ObservedPresent,
+            );
+            reporter.emit(Event::AttendanceProof(proof));
+        }
+    }
 }
 
 fn build_scan_summary(actions: &[Action], skips: &[Skip]) -> String {
@@ -376,12 +587,10 @@ fn record_attendance_success(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_once(
     cfg: &Config,
     client: &AbsenClient,
-    clicked: &mut ClickedState,
-    tracker: &mut JadwalTracker,
+    ctx: &mut EngineContext<'_>,
     reporter: &dyn Reporter,
     source: CommandSource<'_>,
     pre_fetched_html: Option<String>,
@@ -409,8 +618,9 @@ fn run_once(
         }
     };
 
-    let (actions, skips) = find_rows(&html, &cfg.absen_endpoint());
-    let changed = tracker.update(&actions, &skips);
+    let (actions, skips, row_metas) = find_rows_with_meta(&html, &cfg.absen_endpoint());
+    let has_green_row = skips.iter().any(|s| s.color == Color::Green);
+    let changed = ctx.tracker.update(&actions, &skips);
     let summary = build_scan_summary(&actions, &skips);
 
     reporter.emit(Event::Jadwal {
@@ -419,6 +629,15 @@ fn run_once(
     });
     let scan_time = Local::now().format("%H:%M:%S");
     reporter.emit(Event::LastScan(format!("{scan_time} ({summary})")));
+    reporter.emit(Event::PortalSnapshot(PortalPageSnapshot {
+        html,
+        base_url: cfg.base_url.clone(),
+        target_url: cfg.target_url.clone(),
+        captured_at: Local::now().to_rfc3339(),
+        has_green_row,
+    }));
+
+    process_green_rows(cfg, &row_metas, ctx, reporter);
 
     if first_run {
         emit_log(
@@ -451,7 +670,7 @@ fn run_once(
         if interruptible_sleep(source, Duration::ZERO) {
             return Ok(true);
         }
-        if clicked.contains(&action.sig) {
+        if ctx.clicked.contains(&action.sig) {
             continue;
         }
         emit_log(
@@ -466,7 +685,7 @@ fn run_once(
             if jitter_sleep(cfg, source) {
                 return Ok(true);
             }
-            let (status, body) = match client.post_absen(cfg, &action) {
+            let resp = match client.post_absen_with_meta(cfg, &action) {
                 Ok(res) => res,
                 Err(e) => {
                     emit_log(
@@ -486,14 +705,67 @@ fn run_once(
                 return Ok(true);
             }
 
-            if response_indicates_success(status, &body) {
-                record_attendance_success(&action, attempt, false, clicked, tracker, reporter);
+            if response_indicates_success(resp.status, &resp.body) {
+                record_attendance_success(
+                    &action,
+                    attempt,
+                    false,
+                    ctx.clicked,
+                    ctx.tracker,
+                    reporter,
+                );
+                let proof = build_proof_from_action(
+                    &action,
+                    ctx.user_info,
+                    cfg,
+                    &resp,
+                    attempt,
+                    ProofVerification::PostAccepted,
+                    None,
+                );
+                persist_and_emit_proof(proof, ctx.proofs, reporter);
                 done = true;
                 break;
             }
 
-            if !still_blue(client, cfg, &action) {
-                record_attendance_success(&action, attempt, true, clicked, tracker, reporter);
+            if let VerifyOutcome::Confirmed {
+                actions: new_actions,
+                skips: new_skips,
+                green_btn_label,
+                html: verified_html,
+            } = verify_after_post(client, cfg, &action)
+            {
+                let has_green_row = new_skips.iter().any(|s| s.color == Color::Green);
+                record_attendance_success(
+                    &action,
+                    attempt,
+                    true,
+                    ctx.clicked,
+                    ctx.tracker,
+                    reporter,
+                );
+                let _ = ctx.tracker.update(&new_actions, &new_skips);
+                reporter.emit(Event::Jadwal {
+                    actions: new_actions,
+                    skips: new_skips,
+                });
+                reporter.emit(Event::PortalSnapshot(PortalPageSnapshot {
+                    html: verified_html,
+                    base_url: cfg.base_url.clone(),
+                    target_url: cfg.target_url.clone(),
+                    captured_at: Local::now().to_rfc3339(),
+                    has_green_row,
+                }));
+                let proof = build_proof_from_action(
+                    &action,
+                    ctx.user_info,
+                    cfg,
+                    &resp,
+                    attempt,
+                    ProofVerification::PortalVerified,
+                    green_btn_label,
+                );
+                persist_and_emit_proof(proof, ctx.proofs, reporter);
                 done = true;
                 break;
             }
@@ -584,7 +856,7 @@ fn run_inner(
     };
 
     let user_info = parse_user_header(&initial_html, &cfg.username);
-    reporter.emit(Event::UserInfo(user_info));
+    reporter.emit(Event::UserInfo(user_info.clone()));
 
     if let Some(path) = &cfg.env_path_used {
         emit_log(
@@ -596,6 +868,12 @@ fn run_inner(
     }
 
     let mut clicked = ClickedState::load(&cfg.state_file);
+    let mut proofs = ProofStore::load(proof_path_for(&cfg.state_file));
+    // Emit oldest-to-newest so newest-first consumers prepend newest to index 0.
+    for proof in proofs.all() {
+        reporter.emit(Event::AttendanceProof(proof.clone()));
+    }
+    let mut observed_proofs = HashSet::new();
     let mut tracker = JadwalTracker::default();
     let loop_label = if loop_mode { "True" } else { "False" };
     emit_log(
@@ -608,6 +886,14 @@ fn run_inner(
     let mut first = true;
     let mut reusable_html = Some(initial_html);
 
+    let mut ctx = EngineContext {
+        clicked: &mut clicked,
+        proofs: &mut proofs,
+        observed_proofs: &mut observed_proofs,
+        tracker: &mut tracker,
+        user_info: &user_info,
+    };
+
     loop {
         if interruptible_sleep(source, Duration::ZERO) {
             break;
@@ -616,8 +902,7 @@ fn run_inner(
         if let Err(e) = run_once(
             cfg,
             client,
-            &mut clicked,
-            &mut tracker,
+            &mut ctx,
             reporter,
             source,
             reusable_html.take(),

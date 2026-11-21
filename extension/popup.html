@@ -10,7 +10,7 @@
     --blue:#58a6ff; --cyan:#39d0d8; --green:#3fb950; --yellow:#d29922; --red:#f85149;
   }
   *{box-sizing:border-box}
-  body{font:12px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;width:316px;
+  body{font:12px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;width:336px;
        padding:0;background:var(--bg);color:var(--fg);margin:0}
   header{padding:12px 14px 10px;border-bottom:1px solid var(--line);background:var(--card)}
   h1{font-size:12.5px;margin:0;letter-spacing:.9px;color:var(--blue);text-align:center;font-weight:700}
@@ -39,6 +39,26 @@
   .b-orange{color:var(--yellow);border-color:#9e6a03;background:rgba(210,153,34,.12)}
   .b-red{color:var(--red);border-color:#8c2320;background:rgba(248,81,73,.12)}
   .flow{margin-top:10px;font-size:9.5px;color:#6e7681;text-align:center;line-height:1.7}
+  .card-hd{display:flex;align-items:center;justify-content:space-between;gap:6px}
+  .proof-count{font-size:9.5px;font-weight:700;color:var(--green);background:rgba(35,134,54,.12);
+               border:1px solid #238636;border-radius:999px;padding:0 6px;text-transform:none;letter-spacing:0}
+  .proof-empty{font-size:10.5px;color:var(--dim);padding:6px 9px}
+  .proof-list{max-height:220px;overflow-y:auto;display:flex;flex-direction:column;gap:6px;padding:7px 9px}
+  .proof-list::-webkit-scrollbar{width:6px}
+  .proof-list::-webkit-scrollbar-thumb{background:#30363d;border-radius:3px}
+  .proof-item{border:1px solid #262c36;border-radius:6px;background:#0d1117;padding:7px 8px}
+  .proof-top{display:flex;align-items:flex-start;justify-content:space-between;gap:6px}
+  .proof-mk{font-size:11px;font-weight:700;color:var(--fg);line-height:1.35;word-break:break-word}
+  .proof-meta{font-size:10px;color:var(--dim);margin-top:2px;display:flex;flex-wrap:wrap;gap:4px;align-items:center}
+  .proof-actions{display:flex;gap:5px;margin-top:6px;align-items:center}
+  .proof-btn{background:#21262d;border:1px solid var(--line);color:var(--fg);border-radius:5px;
+             padding:2px 7px;font:700 10px/1.35 ui-monospace,Consolas,monospace;cursor:pointer}
+  .proof-btn:hover{background:#30363d}
+  .proof-btn.copy{border-color:#238636;color:var(--green)}
+  .proof-btn.copy.copied{background:rgba(35,134,54,.24);border-color:var(--green);color:#fff}
+  .proof-detail{margin-top:6px;padding-top:6px;border-top:1px solid #21262d;font-size:10px}
+  .proof-detail[hidden]{display:none}
+  .proof-detail dl{grid-template-columns:64px 1fr;gap:2px 6px}
 </style>
 </head>
 <body>
@@ -63,6 +83,15 @@
     <div class="warn" id="warn">[??] NIM/password belum diisi. Buka Pengaturan dulu.</div>
 
     <div class="links"><a id="open-options">&#9881; Pengaturan</a></div>
+
+    <div class="card" id="proof-card" style="margin-top:12px">
+      <div class="card-t card-hd">
+        <span>Bukti Kehadiran Hari Ini</span>
+        <span class="proof-count" id="proof-count" hidden>0 hadir</span>
+      </div>
+      <div class="proof-empty" id="proof-empty">Belum ada bukti presensi tercatat hari ini.</div>
+      <div class="proof-list" id="proof-list" hidden></div>
+    </div>
 
     <div class="card" style="margin-top:12px">
       <div class="card-t">Arti warna tombol</div>

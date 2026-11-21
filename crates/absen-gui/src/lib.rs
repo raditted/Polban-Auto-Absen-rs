@@ -6,6 +6,7 @@ pub mod credentials;
 pub mod icon;
 pub mod platform;
 pub mod prefs;
+pub mod screenshot;
 pub mod theme;
 pub mod ui;
 pub mod updater;

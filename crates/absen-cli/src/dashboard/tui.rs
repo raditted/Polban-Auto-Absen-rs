@@ -6,8 +6,10 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::Once;
 use std::time::{Duration, Instant};
 
-use absen_core::text::jam_ringkas;
-use absen_core::{Color as AbsenColor, Event as EngineEvent, LogLevel};
+use absen_core::text::{jam_ringkas, nama_dosen};
+use absen_core::{
+    AttendanceProof, Color as AbsenColor, Event as EngineEvent, LogLevel, ProofVerification,
+};
 use chrono::{Datelike, Local, NaiveDate, Weekday};
 use crossterm::cursor::{Hide, Show};
 use crossterm::event as ct_event;
@@ -21,7 +23,7 @@ use ratatui::layout::{Alignment, Constraint, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols::border;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Widget};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Widget};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 
 use crate::dashboard::keys::{map_crossterm_event, ScrollAction, UserAction};
@@ -974,10 +976,396 @@ pub fn render_dashboard(
             }
         }
     }
+
+    if let (Some(idx), Some(proof)) = (state.proof_modal_index, state.active_proof()) {
+        render_proof_overlay(buf, area, proof, idx, state.proofs.len(), opts);
+    }
 }
 
-/// Print short summary after leaving alternate screen (parity with `Dashboard.render_summary`).
-pub fn render_summary(state: &DashboardState) {
+fn char_display_width(ch: char) -> usize {
+    match ch {
+        '\u{0300}'..='\u{036F}'
+        | '\u{1AB0}'..='\u{1AFF}'
+        | '\u{1DC0}'..='\u{1DFF}'
+        | '\u{20D0}'..='\u{20FF}'
+        | '\u{FE00}'..='\u{FE0F}'
+        | '\u{200B}'..='\u{200D}'
+        | '\u{FEFF}' => 0,
+        '\u{1100}'..='\u{115F}'
+        | '\u{2E80}'..='\u{A4CF}'
+        | '\u{AC00}'..='\u{D7A3}'
+        | '\u{F900}'..='\u{FAFF}'
+        | '\u{FE10}'..='\u{FE19}'
+        | '\u{FE30}'..='\u{FE6F}'
+        | '\u{FF00}'..='\u{FF60}'
+        | '\u{FFE0}'..='\u{FFE6}'
+        | '\u{1F300}'..='\u{1FAFF}'
+        | '\u{20000}'..='\u{3FFFD}' => 2,
+        _ => 1,
+    }
+}
+
+fn str_display_width(s: &str) -> usize {
+    s.chars().map(char_display_width).sum()
+}
+
+fn clean_display_text(raw: &str) -> String {
+    const DOUBLE_HYPHEN_SEP: &str = concat!(" ", "-", "-", " ");
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '\u{2014}' => out.push('-'),
+            '\r' | '\n' | '\t' => out.push(' '),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out.replace(DOUBLE_HYPHEN_SEP, " - ")
+}
+
+fn truncate_display_width(raw: &str, max_w: usize) -> String {
+    let clean = clean_display_text(raw);
+    if str_display_width(&clean) <= max_w {
+        return clean;
+    }
+    if max_w == 0 {
+        return String::new();
+    }
+    if max_w <= 3 {
+        let mut out = String::new();
+        let mut w = 0;
+        for ch in clean.chars() {
+            let cw = char_display_width(ch);
+            if w + cw > max_w {
+                break;
+            }
+            out.push(ch);
+            w += cw;
+        }
+        return out;
+    }
+    let limit = max_w - 3;
+    let mut out = String::new();
+    let mut w = 0;
+    for ch in clean.chars() {
+        let cw = char_display_width(ch);
+        if w + cw > limit {
+            break;
+        }
+        out.push(ch);
+        w += cw;
+    }
+    out.push_str("...");
+    out
+}
+
+fn wrap_display_width(raw: &str, max_w: usize, max_lines: usize) -> Vec<String> {
+    let w = max_w.max(1);
+    let clean = clean_display_text(raw);
+    if str_display_width(&clean) <= w || max_lines <= 1 {
+        return vec![truncate_display_width(&clean, w)];
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut cur_w = 0usize;
+    let mut rest = clean.as_str();
+
+    while !rest.is_empty() {
+        if lines.len() + 1 == max_lines {
+            lines.push(truncate_display_width(rest.trim_start(), w));
+            return lines;
+        }
+
+        let next_word = match rest.find(' ') {
+            Some(pos) => &rest[..=pos],
+            None => rest,
+        };
+        rest = &rest[next_word.len()..];
+
+        let trimmed = next_word.trim_end_matches(' ');
+        let trimmed_w = str_display_width(trimmed);
+        let full_w = str_display_width(next_word);
+
+        if cur_w > 0 && cur_w + trimmed_w > w {
+            lines.push(current.trim_end().to_string());
+            current.clear();
+            cur_w = 0;
+            if lines.len() + 1 == max_lines {
+                let mut combined = String::from(next_word);
+                combined.push_str(rest);
+                lines.push(truncate_display_width(combined.trim_start(), w));
+                return lines;
+            }
+        }
+
+        if trimmed_w > w {
+            for (byte_idx, ch) in next_word.char_indices() {
+                let cw = char_display_width(ch);
+                if cur_w + cw > w && cur_w > 0 {
+                    lines.push(std::mem::take(&mut current));
+                    cur_w = 0;
+                    if lines.len() + 1 == max_lines {
+                        let mut combined = String::from(&next_word[byte_idx..]);
+                        combined.push_str(rest);
+                        lines.push(truncate_display_width(combined.trim_start(), w));
+                        return lines;
+                    }
+                }
+                current.push(ch);
+                cur_w += cw;
+            }
+        } else if cur_w > 0 && cur_w + full_w > w {
+            current.push_str(trimmed);
+            lines.push(std::mem::take(&mut current));
+            cur_w = 0;
+        } else {
+            current.push_str(next_word);
+            cur_w += full_w;
+        }
+    }
+
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(truncate_display_width(current.trim_end(), w));
+    }
+    lines
+}
+
+fn verification_badge(verification: ProofVerification) -> (&'static str, Style) {
+    match verification {
+        ProofVerification::PortalVerified => (
+            "[TERVERIFIKASI PORTAL]",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        ProofVerification::PostAccepted => (
+            "[DITERIMA SERVER]",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        ProofVerification::ObservedPresent => (
+            "[TERCATAT DI PORTAL]",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+    }
+}
+
+fn render_proof_overlay(
+    buf: &mut Buffer,
+    area: Rect,
+    proof: &AttendanceProof,
+    idx: usize,
+    total: usize,
+    opts: &RenderOptions,
+) {
+    if area.width < 12 || area.height < 7 {
+        return;
+    }
+
+    let modal_w = if area.width >= 90 {
+        74.min(area.width.saturating_sub(4))
+    } else if area.width >= 56 {
+        area.width.saturating_sub(4).min(66)
+    } else {
+        area.width.saturating_sub(2).max(12).min(area.width)
+    };
+    let pad_x: u16 = if modal_w >= 46 { 2 } else { 1 };
+    let content_w = modal_w.saturating_sub(2 + 2 * pad_x).max(1) as usize;
+    let compact = content_w < 44;
+    let label_w: usize = if compact { 8 } else { 10 };
+    let prefix_w = if compact { label_w + 2 } else { label_w + 3 };
+    let val_w = content_w.saturating_sub(prefix_w).max(1);
+    let max_field_lines = if area.height >= 26 { 2 } else { 1 };
+    let dim = Style::default().add_modifier(Modifier::DIM);
+
+    let mut lines: Vec<Line<'_>> = Vec::new();
+    let (badge_text, badge_style) = verification_badge(proof.verification);
+    lines.push(Line::from(Span::styled(
+        truncate_display_width(badge_text, content_w),
+        badge_style,
+    )));
+    if area.height >= 22 {
+        lines.push(Line::from(""));
+    }
+
+    let mut push_field = |label: &str, value: &str, style: Style, max_lines: usize| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let wrapped = wrap_display_width(trimmed, val_w, max_lines);
+        for (line_idx, part) in wrapped.into_iter().enumerate() {
+            let prefix = if line_idx == 0 {
+                if compact {
+                    format!("{label:<label_w$}: ")
+                } else {
+                    format!("{label:<label_w$} : ")
+                }
+            } else {
+                " ".repeat(prefix_w)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(prefix, dim),
+                Span::styled(part, style),
+            ]));
+        }
+    };
+
+    push_field(
+        "ID Bukti",
+        &proof.proof_id,
+        Style::default().add_modifier(Modifier::BOLD),
+        1,
+    );
+
+    let mut mk_meta = Vec::new();
+    if !proof.mk_code.trim().is_empty() && proof.mk_code.trim() != proof.nama_mk.trim() {
+        mk_meta.push(proof.mk_code.trim().to_string());
+    }
+    if !proof.kls.trim().is_empty() {
+        mk_meta.push(format!("Kls {}", proof.kls.trim()));
+    }
+    let mk_display = if mk_meta.is_empty() {
+        proof.nama_mk.clone()
+    } else {
+        format!("{} ({})", proof.nama_mk.trim(), mk_meta.join(", "))
+    };
+    push_field(
+        "Matkul",
+        &mk_display,
+        Style::default().add_modifier(Modifier::BOLD),
+        max_field_lines,
+    );
+
+    let dosen_norm = nama_dosen(&proof.dosen);
+    let dosen_display = if dosen_norm.is_empty() {
+        proof.dosen.as_str()
+    } else {
+        dosen_norm.as_str()
+    };
+    push_field("Dosen", dosen_display, Style::default(), 1);
+
+    let jam_display = if content_w < 36 {
+        jam_ringkas(&proof.jam).into_owned()
+    } else {
+        proof.jam.clone()
+    };
+    push_field("Jam", &jam_display, Style::default(), 1);
+
+    let mhs_label = if compact { "Mhs" } else { "Mahasiswa" };
+    let mhs_display = match (
+        proof.student_nama.trim().is_empty(),
+        proof.nim.trim().is_empty(),
+    ) {
+        (false, false) => format!("{} ({})", proof.student_nama.trim(), proof.nim.trim()),
+        (false, true) => proof.student_nama.trim().to_string(),
+        (true, false) => proof.nim.trim().to_string(),
+        (true, true) => String::new(),
+    };
+    push_field(mhs_label, &mhs_display, Style::default(), 1);
+
+    let recorded_hms = proof.short_time_hms();
+    let tercatat_display = if proof.date.trim().is_empty() {
+        recorded_hms
+    } else if recorded_hms.is_empty() {
+        proof.date.trim().to_string()
+    } else {
+        format!("{} {}", proof.date.trim(), recorded_hms)
+    };
+    push_field("Tercatat", &tercatat_display, Style::default(), 1);
+
+    if let Some(vhms) = proof.verified_time_hms() {
+        let verif_label = if compact { "Verif" } else { "Verifikasi" };
+        push_field(
+            verif_label,
+            &format!("{vhms} (Portal)"),
+            Style::default().fg(Color::Green),
+            1,
+        );
+    }
+
+    if let Some(status) = proof.http_status {
+        let http_text = match proof.attempt {
+            Some(att) => format!("HTTP {status} (percobaan {att})"),
+            None => format!("HTTP {status}"),
+        };
+        push_field("HTTP", &http_text, Style::default(), 1);
+    }
+
+    if let Some(btn) = &proof.server_button_label {
+        if !btn.trim().is_empty() {
+            push_field("Portal", btn, Style::default().fg(Color::Green), 1);
+        }
+    }
+
+    if let Some(resp) = &proof.server_response {
+        if !resp.trim().is_empty() {
+            push_field("Respon", resp, dim, max_field_lines);
+        }
+    }
+
+    let natural_h = (lines.len() as u16).saturating_add(2);
+    let max_modal_h = if area.height >= 10 {
+        area.height.saturating_sub(2)
+    } else {
+        area.height
+    };
+    let modal_h = natural_h.min(max_modal_h).max(4).min(area.height);
+
+    let modal_x = area.x + area.width.saturating_sub(modal_w) / 2;
+    let modal_y = area.y + area.height.saturating_sub(modal_h) / 2;
+    let modal_area = Rect::new(modal_x, modal_y, modal_w, modal_h);
+
+    let title_str = truncate_display_width(
+        &format!("Bukti Kehadiran [{}/{}]", idx + 1, total),
+        modal_w.saturating_sub(2) as usize,
+    );
+    let footer_raw = if total > 1 {
+        let full = "[<-/->] Ganti  [p/Esc] Tutup";
+        if str_display_width(full) + 2 <= modal_w as usize {
+            full
+        } else if str_display_width("[p/Esc] Tutup") + 2 <= modal_w as usize {
+            "[p/Esc] Tutup"
+        } else {
+            "[Esc]"
+        }
+    } else if str_display_width("[p/Esc] Tutup") + 2 <= modal_w as usize {
+        "[p/Esc] Tutup"
+    } else {
+        "[Esc]"
+    };
+
+    Clear.render(modal_area, buf);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_set(border_set(opts.ascii))
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(Span::styled(
+            title_str,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Line::from(Span::styled(footer_raw, dim)).alignment(Alignment::Center));
+    let inner = block.inner(modal_area);
+    block.render(modal_area, buf);
+
+    let padded = Rect::new(
+        inner.x.saturating_add(pad_x),
+        inner.y,
+        inner.width.saturating_sub(2 * pad_x),
+        inner.height,
+    );
+    if padded.width > 0 && padded.height > 0 {
+        Paragraph::new(lines).render(padded, buf);
+    }
+}
+
+fn format_summary_lines(state: &DashboardState) -> Vec<String> {
     let sub = platform::subtitle();
     let nama = if state.user_info.nama.is_empty() {
         "-"
@@ -989,14 +1377,16 @@ pub fn render_summary(state: &DashboardState) {
     } else {
         &state.user_info.nim
     };
-    println!();
-    println!("{COMPACT_TITLE}  {sub}");
-    println!("  Nama    : {nama}  (NIM {nim})");
-    println!(
-        "  Siklus  : {}   berhasil {}   gagal {}",
-        state.cycle_count, state.stat_ok, state.stat_fail
-    );
-    println!("  Scan    : {}", state.last_scan_info);
+    let mut lines = vec![
+        String::new(),
+        format!("{COMPACT_TITLE}  {sub}"),
+        format!("  Nama    : {nama}  (NIM {nim})"),
+        format!(
+            "  Siklus  : {}   berhasil {}   gagal {}",
+            state.cycle_count, state.stat_ok, state.stat_fail
+        ),
+        format!("  Scan    : {}", state.last_scan_info),
+    ];
     for mk in &state.jadwal {
         let label = mk.status.status_label();
         let dosen = if mk.dosen.is_empty() {
@@ -1004,9 +1394,33 @@ pub fn render_summary(state: &DashboardState) {
         } else {
             format!("  {}", mk.dosen)
         };
-        println!("   - {} {}  {label}{dosen}", mk.nama, mk.jam);
+        let proof_info = if mk.status == AbsenColor::Green {
+            if let Some(proof) = state.proof_for_course(mk) {
+                format!(
+                    " | Bukti: {} ({})",
+                    proof.short_time_hms(),
+                    proof.verification_label()
+                )
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+        lines.push(format!(
+            "   - {} {}  {label}{dosen}{proof_info}",
+            mk.nama, mk.jam
+        ));
     }
-    println!();
+    lines.push(String::new());
+    lines
+}
+
+/// Print short summary after leaving alternate screen (parity with `Dashboard.render_summary`).
+pub fn render_summary(state: &DashboardState) {
+    for line in format_summary_lines(state) {
+        println!("{line}");
+    }
 }
 
 /// Print full unclipped dashboard frame to stdout when exiting `--once` / `--no-alt-screen`.
@@ -1096,6 +1510,7 @@ pub fn run_tui(
             let now_tanggal = format_tanggal_id(Local::now().date_naive());
             if now_tanggal != render_opts.tanggal {
                 render_opts.tanggal = now_tanggal;
+                state.refresh_today_date();
                 dirty = true;
             }
         }
@@ -1124,8 +1539,40 @@ pub fn run_tui(
                             should_quit = true;
                         }
                         UserAction::Scroll(scroll) => {
-                            view.apply_scroll(scroll);
-                            dirty = true;
+                            if state.proof_modal_index.is_none() {
+                                view.apply_scroll(scroll);
+                                dirty = true;
+                            }
+                        }
+                        UserAction::ToggleProof => {
+                            if state.proof_modal_index.is_some() || state.has_proofs() {
+                                state.toggle_proof_modal();
+                                dirty = true;
+                            }
+                        }
+                        UserAction::CloseProof => {
+                            if state.proof_modal_index.is_some() {
+                                state.close_proof_modal();
+                                dirty = true;
+                            }
+                        }
+                        UserAction::PrevProof => {
+                            if state.proof_modal_index.is_some() {
+                                let before = state.proof_modal_index;
+                                state.prev_proof();
+                                if state.proof_modal_index != before {
+                                    dirty = true;
+                                }
+                            }
+                        }
+                        UserAction::NextProof => {
+                            if state.proof_modal_index.is_some() {
+                                let before = state.proof_modal_index;
+                                state.next_proof();
+                                if state.proof_modal_index != before {
+                                    dirty = true;
+                                }
+                            }
                         }
                     }
                 }
@@ -1424,5 +1871,172 @@ mod tests {
             let mut buf = Buffer::empty(area);
             render_dashboard(&mut buf, area, &st, &mut view, &opts);
         }
+    }
+
+    fn sample_proof_for_tui() -> AttendanceProof {
+        AttendanceProof {
+            proof_id: "PRF-20261117-1234ABCD".into(),
+            sig: "Basis Data|BD011N-Siti Aminah, M.T.|09:30:00 s.d. 12:00:00".into(),
+            key: "Basis Data|BD011N-Siti Aminah, M.T.".into(),
+            date: "2026-11-17".into(),
+            recorded_at: "2026-11-17T09:31:05+07:00".into(),
+            verified_at: Some("2026-11-17T09:31:07+07:00".into()),
+            server_date_header: None,
+            verification: ProofVerification::PortalVerified,
+            nim: "251511001".into(),
+            student_nama: "Budi Santoso".into(),
+            jurusan: "D3-Teknik Informatika".into(),
+            nama_mk: "Basis Data".into(),
+            mk_code: "25IF202".into(),
+            dosen: "BD011N-Siti Aminah, M.T.".into(),
+            jam: "09:30:00 s.d. 12:00:00".into(),
+            tp: "T".into(),
+            ja: "4".into(),
+            jb: "6".into(),
+            kls: "1A".into(),
+            target_url: "https://akademik.polban.ac.id/ajar/absen".into(),
+            endpoint_url: Some("https://akademik.polban.ac.id/ajar/absen/absensi_awal".into()),
+            http_status: Some(200),
+            server_response: Some("ok".into()),
+            server_button_label: Some("Sudah Absen".into()),
+            attempt: Some(1),
+        }
+    }
+
+    #[test]
+    fn renders_proof_overlay_across_all_breakpoints_without_panicking() {
+        let mut st = sample_state();
+        st.upsert_proof(sample_proof_for_tui());
+        // With modal closed, render remains byte-identical to state without proofs
+        let baseline = render_to_string(
+            120,
+            40,
+            &sample_state(),
+            &mut ViewState::default(),
+            &fixed_opts(false),
+        );
+        let with_closed_modal =
+            render_to_string(120, 40, &st, &mut ViewState::default(), &fixed_opts(false));
+        assert_eq!(baseline, with_closed_modal);
+
+        st.proof_modal_index = Some(0);
+        let opts = fixed_opts(false);
+        for (w, h) in [(120, 40), (80, 28), (50, 24), (40, 20)] {
+            let mut view = ViewState::default();
+            let screen = render_to_string(w, h, &st, &mut view, &opts);
+            assert!(
+                screen.contains("Bukti Kehadiran [1/1]"),
+                "missing title on {w}x{h}:\n{screen}"
+            );
+            assert!(
+                screen.contains("TERVERIFIKASI PORTAL"),
+                "missing badge on {w}x{h}:\n{screen}"
+            );
+            assert!(
+                screen.contains("PRF-20261117-1234ABCD"),
+                "missing proof id on {w}x{h}:\n{screen}"
+            );
+            assert!(
+                screen.contains("Basis Data"),
+                "missing course name on {w}x{h}:\n{screen}"
+            );
+            assert!(
+                screen.contains("2026-11-17 09:31:05"),
+                "missing proof date and time on {w}x{h}:\n{screen}"
+            );
+            assert!(
+                screen.contains("Tutup"),
+                "missing footer hint on {w}x{h}:\n{screen}"
+            );
+        }
+    }
+
+    #[test]
+    fn proof_overlay_displays_date_across_multiday_navigation() {
+        let mut st = sample_state();
+        let mut older = sample_proof_for_tui();
+        older.proof_id = "PRF-20261119-00000001".into();
+        older.date = "2026-11-19".into();
+        older.recorded_at = "2026-11-19T08:15:00+07:00".into();
+        older.verified_at = Some("2026-11-19T08:15:03+07:00".into());
+
+        let mut newer = sample_proof_for_tui();
+        newer.proof_id = "PRF-20261120-00000002".into();
+        newer.date = "2026-11-20".into();
+        newer.recorded_at = "2026-11-20T07:05:12+07:00".into();
+        newer.verified_at = Some("2026-11-20T07:05:15+07:00".into());
+
+        st.upsert_proof(older);
+        st.upsert_proof(newer);
+        st.toggle_proof_modal();
+
+        let opts = fixed_opts(false);
+        let first_screen = render_to_string(80, 28, &st, &mut ViewState::default(), &opts);
+        assert!(first_screen.contains("Bukti Kehadiran [1/2]"));
+        assert!(first_screen.contains("2026-11-20 07:05:12"));
+
+        st.next_proof();
+        let second_screen = render_to_string(80, 28, &st, &mut ViewState::default(), &opts);
+        assert!(second_screen.contains("Bukti Kehadiran [2/2]"));
+        assert!(second_screen.contains("2026-11-19 08:15:00"));
+    }
+
+    #[test]
+    fn renders_proof_overlay_extreme_small_and_unicode_without_panicking() {
+        let mut st = sample_state();
+        let mut proof = sample_proof_for_tui();
+        proof.nama_mk = "Pemrograman Berorientasi Objek Kelas Khusus 🚀".into();
+        proof.student_nama = "Éka Pratama Ünicode 🚀".into();
+        proof.server_response = Some("Presensi berhasil tercatat di portal akademik 🚀".into());
+        st.upsert_proof(proof);
+        st.proof_modal_index = Some(0);
+
+        let opts = fixed_opts(false);
+        for (w, h) in [(0, 0), (4, 4), (10, 6), (24, 12), (32, 14)] {
+            let mut view = ViewState::default();
+            let area = Rect::new(0, 0, w, h);
+            let mut buf = Buffer::empty(area);
+            render_dashboard(&mut buf, area, &st, &mut view, &opts);
+        }
+    }
+
+    #[test]
+    fn summary_appends_proof_info_only_when_present_and_green() {
+        let base = sample_state();
+        let lines_without = format_summary_lines(&base).join("\n");
+        assert!(!lines_without.contains("Bukti:"));
+
+        let mut with_proof = sample_state();
+        with_proof.jadwal.push(MataKuliah {
+            nama: "Basis Data".into(),
+            jam: "13:00:00 s.d. 15:30:00".into(),
+            dosen: "Dosen Lain".into(),
+            status: AbsenColor::Blue,
+        });
+        with_proof.jadwal.push(MataKuliah {
+            nama: "Basis Data".into(),
+            jam: "09:30:00 s.d. 12:00:00".into(),
+            dosen: "Siti Aminah, M.T.".into(),
+            status: AbsenColor::Blue,
+        });
+        with_proof.upsert_proof(sample_proof_for_tui());
+        with_proof.today_date = "2026-11-17".into();
+        let lines = format_summary_lines(&with_proof);
+        let green_lines: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("SUDAH ABSEN") && l.contains("Bukti:"))
+            .collect();
+        assert_eq!(green_lines.len(), 1);
+        assert!(green_lines[0].contains("| Bukti: 09:31:05 (Terverifikasi Portal)"));
+
+        // Non-Green rows (even with matching name/dosen/jam) must never show Bukti:
+        let non_green_with_proof: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("SIAP ABSEN") && l.contains("Bukti:"))
+            .collect();
+        assert!(
+            non_green_with_proof.is_empty(),
+            "non-green row leaked proof: {non_green_with_proof:?}"
+        );
     }
 }

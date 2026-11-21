@@ -353,6 +353,15 @@ pub fn pick_diagnostic_html_save_path() -> Option<PathBuf> {
         .save_file()
 }
 
+/// Open a native save dialog for exporting an attendance proof or portal preview PNG.
+pub fn pick_proof_image_save_path(default_filename: &str) -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .set_title("Simpan Gambar Pratinjau Absen")
+        .set_file_name(default_filename)
+        .add_filter("PNG", &["png"])
+        .save_file()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

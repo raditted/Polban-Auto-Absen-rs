@@ -4,6 +4,7 @@ pub mod activity;
 pub mod header;
 pub mod icons;
 pub mod jadwal;
+pub mod proof;
 pub mod settings;
 
 use std::borrow::Cow;
