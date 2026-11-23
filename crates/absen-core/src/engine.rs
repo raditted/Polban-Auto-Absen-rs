@@ -705,29 +705,7 @@ fn run_once(
                 return Ok(true);
             }
 
-            if response_indicates_success(resp.status, &resp.body) {
-                record_attendance_success(
-                    &action,
-                    attempt,
-                    false,
-                    ctx.clicked,
-                    ctx.tracker,
-                    reporter,
-                );
-                let proof = build_proof_from_action(
-                    &action,
-                    ctx.user_info,
-                    cfg,
-                    &resp,
-                    attempt,
-                    ProofVerification::PostAccepted,
-                    None,
-                );
-                persist_and_emit_proof(proof, ctx.proofs, reporter);
-                done = true;
-                break;
-            }
-
+            let post_ok = response_indicates_success(resp.status, &resp.body);
             if let VerifyOutcome::Confirmed {
                 actions: new_actions,
                 skips: new_skips,
@@ -764,6 +742,29 @@ fn run_once(
                     attempt,
                     ProofVerification::PortalVerified,
                     green_btn_label,
+                );
+                persist_and_emit_proof(proof, ctx.proofs, reporter);
+                done = true;
+                break;
+            }
+
+            if post_ok {
+                record_attendance_success(
+                    &action,
+                    attempt,
+                    false,
+                    ctx.clicked,
+                    ctx.tracker,
+                    reporter,
+                );
+                let proof = build_proof_from_action(
+                    &action,
+                    ctx.user_info,
+                    cfg,
+                    &resp,
+                    attempt,
+                    ProofVerification::PostAccepted,
+                    None,
                 );
                 persist_and_emit_proof(proof, ctx.proofs, reporter);
                 done = true;

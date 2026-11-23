@@ -565,6 +565,16 @@ enum CaptureJob {
     Shutdown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnqueueMode {
+    /// Capture automatically only when the PNG is missing and the snapshot has a green row.
+    IfMissingWhenGreen,
+    /// Re-capture automatically when the snapshot has a green row, overwriting stale PNGs.
+    RefreshWhenGreen,
+    /// On-demand user capture regardless of green row or existing PNG.
+    ForceManual,
+}
+
 struct CaptureHub {
     snapshot: Arc<Mutex<GuiSnapshot>>,
     window_visible: Arc<AtomicBool>,
@@ -572,6 +582,7 @@ struct CaptureHub {
     proof_records: Mutex<HashMap<String, AttendanceProof>>,
     screenshot_dir: Mutex<Option<PathBuf>>,
     pending_ids: Mutex<HashSet<String>>,
+    refresh_needed: Mutex<HashMap<String, EnqueueMode>>,
     wake_ui: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     tx: Mutex<Option<mpsc::Sender<CaptureJob>>>,
     worker: Mutex<Option<JoinHandle<()>>>,
@@ -586,6 +597,7 @@ impl CaptureHub {
             proof_records: Mutex::new(HashMap::new()),
             screenshot_dir: Mutex::new(None),
             pending_ids: Mutex::new(HashSet::new()),
+            refresh_needed: Mutex::new(HashMap::new()),
             wake_ui: Mutex::new(None),
             tx: Mutex::new(None),
             worker: Mutex::new(None),
@@ -670,6 +682,11 @@ impl CaptureHub {
                                 if let Ok(mut pending) = hub.pending_ids.lock() {
                                     pending.remove(&proof_id);
                                 }
+                                let next_mode = hub
+                                    .refresh_needed
+                                    .lock()
+                                    .ok()
+                                    .and_then(|mut map| map.remove(&proof_id));
                                 if let Ok(mut snap) = hub.snapshot.lock() {
                                     if snap.capturing_proof_id.as_deref() == Some(proof_id.as_str())
                                     {
@@ -679,6 +696,9 @@ impl CaptureHub {
                                         snap.screenshot_revision.wrapping_add(1);
                                 }
                                 hub.wake();
+                                if let Some(mode) = next_mode {
+                                    hub.enqueue_proof(&proof_id, mode);
+                                }
                             }
                             CaptureJob::LivePreview { snapshot, reply_tx } => {
                                 let captured_at = snapshot.captured_at.clone();
@@ -741,6 +761,9 @@ impl CaptureHub {
         if let Ok(mut html) = self.latest_portal_html.lock() {
             *html = None;
         }
+        if let Ok(mut refresh) = self.refresh_needed.lock() {
+            refresh.clear();
+        }
         if let Ok(mut snap) = self.snapshot.lock() {
             snap.has_portal_snapshot = false;
             snap.portal_snapshot_captured_at = None;
@@ -750,11 +773,16 @@ impl CaptureHub {
     fn valid_proof_ids(&self) -> HashSet<String> {
         self.snapshot
             .lock()
-            .map(|s| s.proofs.iter().map(|p| p.proof_id.clone()).collect())
+            .map(|s| {
+                s.proofs
+                    .iter()
+                    .map(|p| sanitize_proof_id_for_filename(&p.proof_id))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
-    fn enqueue_proof(self: &Arc<Self>, proof_id: &str, only_if_missing: bool) {
+    fn enqueue_proof(self: &Arc<Self>, proof_id: &str, mode: EnqueueMode) {
         let trimmed = proof_id.trim();
         if trimmed.is_empty() {
             return;
@@ -762,13 +790,13 @@ impl CaptureHub {
         let Some(portal_snap) = self.latest_portal_html.lock().ok().and_then(|g| g.clone()) else {
             return;
         };
-        if only_if_missing && !portal_snap.has_green_row {
+        if mode != EnqueueMode::ForceManual && !portal_snap.has_green_row {
             return;
         }
 
         let out_dir = self.current_screenshot_dir();
         let target_path = out_dir.join(format!("{}.png", sanitize_proof_id_for_filename(trimmed)));
-        if only_if_missing && target_path.is_file() {
+        if mode == EnqueueMode::IfMissingWhenGreen && target_path.is_file() {
             return;
         }
 
@@ -777,6 +805,18 @@ impl CaptureHub {
                 return;
             };
             if !pending.insert(trimmed.to_string()) {
+                if mode != EnqueueMode::IfMissingWhenGreen {
+                    if let Ok(mut refresh) = self.refresh_needed.lock() {
+                        refresh
+                            .entry(trimmed.to_string())
+                            .and_modify(|existing| {
+                                if mode == EnqueueMode::ForceManual {
+                                    *existing = EnqueueMode::ForceManual;
+                                }
+                            })
+                            .or_insert(mode);
+                    }
+                }
                 return;
             }
         }
@@ -1062,9 +1102,19 @@ impl Reporter for BridgeReporter {
             Event::PortalSnapshot(portal_snap) => {
                 let captured_at = sanitize_text(&portal_snap.captured_at);
                 let has_green = portal_snap.has_green_row;
-                if let Ok(mut guard) = self.capture.latest_portal_html.lock() {
+                let refresh_existing = if let Ok(mut guard) = self.capture.latest_portal_html.lock()
+                {
+                    let changed = match guard.as_ref() {
+                        Some(prev) => {
+                            has_green && (!prev.has_green_row || prev.html != portal_snap.html)
+                        }
+                        None => false,
+                    };
                     *guard = Some(portal_snap);
-                }
+                    changed
+                } else {
+                    false
+                };
                 let mut candidate_ids = Vec::new();
                 if let Ok(mut snap) = self.snapshot.lock() {
                     snap.has_portal_snapshot = true;
@@ -1072,17 +1122,25 @@ impl Reporter for BridgeReporter {
                     if has_green {
                         let today = snap.today_date.clone();
                         for p in &snap.proofs {
-                            let eligible = p.verification == ProofVerification::PortalVerified
-                                || (p.verification == ProofVerification::ObservedPresent
-                                    && p.date == today);
+                            let eligible = p.date == today
+                                && matches!(
+                                    p.verification,
+                                    ProofVerification::PortalVerified
+                                        | ProofVerification::ObservedPresent
+                                );
                             if eligible && !p.proof_id.is_empty() {
                                 candidate_ids.push(p.proof_id.clone());
                             }
                         }
                     }
                 }
+                let mode = if refresh_existing {
+                    EnqueueMode::RefreshWhenGreen
+                } else {
+                    EnqueueMode::IfMissingWhenGreen
+                };
                 for pid in candidate_ids {
-                    self.capture.enqueue_proof(&pid, true);
+                    self.capture.enqueue_proof(&pid, mode);
                 }
                 self.wake();
             }
@@ -1097,7 +1155,22 @@ impl Reporter for BridgeReporter {
                 let preview = ProofPreview::from_proof(proof);
                 let proof_sig = preview.sig.clone();
                 let proof_nama = preview.nama_mk.clone();
+                let mut should_refresh_verified = false;
                 if let Ok(mut snap) = self.snapshot.lock() {
+                    let prev_verification = snap
+                        .proofs
+                        .iter()
+                        .find(|p| {
+                            p.date == preview.date
+                                && (p.sig == preview.sig
+                                    || (!p.key.is_empty() && p.key == preview.key))
+                        })
+                        .map(|p| p.verification);
+                    should_refresh_verified = preview.verification
+                        == ProofVerification::PortalVerified
+                        && preview.date == today
+                        && prev_verification != Some(ProofVerification::PortalVerified);
+
                     snap.today_date = today;
                     snap.upsert_proof(preview);
                     // Back-link any recent ABSEN Ok row missing a proof_key for this course.
@@ -1114,7 +1187,12 @@ impl Reporter for BridgeReporter {
                     }
                 }
                 if eligible_for_shot {
-                    self.capture.enqueue_proof(&proof_id, true);
+                    let mode = if should_refresh_verified {
+                        EnqueueMode::RefreshWhenGreen
+                    } else {
+                        EnqueueMode::IfMissingWhenGreen
+                    };
+                    self.capture.enqueue_proof(&proof_id, mode);
                 }
                 self.wake();
             }
@@ -1231,7 +1309,8 @@ impl EngineController {
 
     /// Enqueue an on-demand screenshot capture/refresh for `proof_id` using the latest cached HTML.
     pub fn request_proof_screenshot(&self, proof_id: String) {
-        self.capture.enqueue_proof(&proof_id, false);
+        self.capture
+            .enqueue_proof(&proof_id, EnqueueMode::ForceManual);
     }
 
     /// Request an on-demand live attendance preview PNG from the latest cached `/ajar/absen` HTML.
@@ -1809,6 +1888,122 @@ mod tests {
         assert_eq!(snap.proofs[1].date, yesterday_s);
         assert_eq!(snap.proofs[1].nama_mk, "Matematika Diskrit");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn green_snapshot_and_portal_verified_upgrade_refresh_stale_screenshot() {
+        let dir =
+            std::env::temp_dir().join(format!("polban_absen_gui_refresh_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let state_file = dir.join("clicked.json");
+
+        let snapshot = Arc::new(Mutex::new(GuiSnapshot::default()));
+        let window_visible = Arc::new(AtomicBool::new(true));
+        let capture = Arc::new(CaptureHub::new(
+            Arc::clone(&snapshot),
+            Arc::clone(&window_visible),
+        ));
+        capture.set_state_file(&state_file);
+
+        let reporter = BridgeReporter {
+            snapshot: Arc::clone(&snapshot),
+            capture: Arc::clone(&capture),
+            notifier: Arc::new(Mutex::new(Notifier::new(false))),
+            wake_ui: None,
+            window_visible,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            sticky_sigs: Mutex::new(HashSet::new()),
+            sticky_names: Mutex::new(HashSet::new()),
+        };
+
+        let today = local_today_str();
+        let cyan_html = r#"<!DOCTYPE html><html><body><table id="jadwal"><tr><td>1</td><td>KO078N-Trisna Gelar</td><td>25IF201</td><td>Struktur Data</td><td>T</td><td>1</td><td>3</td><td>07:00:00 s.d. 09:30:00</td><td><button class="btn btn-primary">Absen Awal</button></td></tr></table></body></html>"#;
+        let green_html = r#"<!DOCTYPE html><html><body><table id="jadwal"><tr><td>1</td><td>KO078N-Trisna Gelar</td><td>25IF201</td><td>Struktur Data</td><td>T</td><td>1</td><td>3</td><td>07:00:00 s.d. 09:30:00</td><td><button class="btn btn-success">Sudah Absen</button></td></tr></table></body></html>"#;
+
+        // 1. Blue/cyan snapshot + PostAccepted proof + stale cyan PNG written on disk.
+        reporter.emit(Event::PortalSnapshot(PortalPageSnapshot {
+            html: cyan_html.to_string(),
+            base_url: "https://akademik.polban.ac.id".to_string(),
+            target_url: "https://akademik.polban.ac.id/ajar/absen".to_string(),
+            captured_at: format!("{today}T07:05:00+07:00"),
+            has_green_row: false,
+        }));
+        let post_accepted = make_test_proof(
+            "Struktur Data",
+            "KO078N-Trisna Gelar",
+            "07:00:00 s.d. 09:30:00",
+            ProofVerification::PostAccepted,
+            &format!("{today}T07:05:12+07:00"),
+        );
+        let proof_id = post_accepted.proof_id.clone();
+        reporter.emit(Event::AttendanceProof(post_accepted));
+
+        let shot_path = capture.screenshot_path_for(&proof_id);
+        let stale_marker = b"STALE_CYAN_PLACEHOLDER";
+        write_png_atomic(&shot_path, stale_marker).unwrap();
+
+        // 2. Green snapshot arrives and proof upgrades to PortalVerified -> stale PNG must be overwritten.
+        reporter.emit(Event::PortalSnapshot(PortalPageSnapshot {
+            html: green_html.to_string(),
+            base_url: "https://akademik.polban.ac.id".to_string(),
+            target_url: "https://akademik.polban.ac.id/ajar/absen".to_string(),
+            captured_at: format!("{today}T07:05:15+07:00"),
+            has_green_row: true,
+        }));
+        let portal_verified = make_test_proof(
+            "Struktur Data",
+            "KO078N-Trisna Gelar",
+            "07:00:00 s.d. 09:30:00",
+            ProofVerification::PortalVerified,
+            &format!("{today}T07:05:12+07:00"),
+        );
+        reporter.emit(Event::AttendanceProof(portal_verified));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+        loop {
+            let rev = snapshot.lock().unwrap().screenshot_revision;
+            let bytes = std::fs::read(&shot_path).unwrap_or_default();
+            if rev >= 1 && bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for stale screenshot refresh"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        let rev_after_upgrade = snapshot.lock().unwrap().screenshot_revision;
+
+        // 3. Subsequent green snapshot with different HTML (e.g. a second course turns green)
+        // must also re-enqueue and overwrite the existing PNG.
+        let green_html_2 = r#"<!DOCTYPE html><html><body><table id="jadwal"><tr><td>1</td><td>KO078N-Trisna Gelar</td><td>25IF201</td><td>Struktur Data</td><td>T</td><td>1</td><td>3</td><td>07:00:00 s.d. 09:30:00</td><td><button class="btn btn-success">Sudah Absen</button></td></tr><tr><td>2</td><td>BD011N-Budi</td><td>25IF202</td><td>Basis Data</td><td>P</td><td>4</td><td>6</td><td>10:00:00 s.d. 12:00:00</td><td><button class="btn btn-success">Sudah Absen</button></td></tr></table></body></html>"#;
+        write_png_atomic(&shot_path, stale_marker).unwrap();
+        reporter.emit(Event::PortalSnapshot(PortalPageSnapshot {
+            html: green_html_2.to_string(),
+            base_url: "https://akademik.polban.ac.id".to_string(),
+            target_url: "https://akademik.polban.ac.id/ajar/absen".to_string(),
+            captured_at: format!("{today}T07:06:00+07:00"),
+            has_green_row: true,
+        }));
+
+        let deadline2 = std::time::Instant::now() + std::time::Duration::from_secs(12);
+        loop {
+            let rev = snapshot.lock().unwrap().screenshot_revision;
+            let bytes = std::fs::read(&shot_path).unwrap_or_default();
+            if rev > rev_after_upgrade && bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline2,
+                "timed out waiting for green PortalSnapshot refresh"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        capture.shutdown();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

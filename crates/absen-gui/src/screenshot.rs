@@ -201,6 +201,172 @@ fn strip_meta_refresh_ci(html: &str) -> String {
     out
 }
 
+/// Remove `<link ...>` tags referencing external font providers (e.g., `//fonts.googleapis.com`).
+fn strip_external_font_links_ci(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let mut out = String::with_capacity(html.len());
+    let mut cursor = 0;
+
+    while cursor < html.len() {
+        let Some(rel_start) = lower[cursor..].find("<link") else {
+            out.push_str(&html[cursor..]);
+            break;
+        };
+        let start = cursor + rel_start;
+        let after_name = start + 5;
+        if !is_tag_boundary(lower.as_bytes().get(after_name).copied()) {
+            out.push_str(&html[cursor..after_name]);
+            cursor = after_name;
+            continue;
+        }
+
+        out.push_str(&html[cursor..start]);
+        let Some(rel_gt) = lower[after_name..].find('>') else {
+            out.push_str(&html[start..]);
+            break;
+        };
+        let end = after_name + rel_gt + 1;
+        let tag_lower = &lower[start..end];
+        let is_font_link = tag_lower.contains("//fonts.")
+            || tag_lower.contains("fonts.googleapis.com")
+            || tag_lower.contains("fonts.gstatic.com");
+        if !is_font_link {
+            out.push_str(&html[start..end]);
+        }
+        cursor = end;
+    }
+
+    out
+}
+
+fn find_at_import_end(css_bytes: &[u8], after_keyword: usize) -> usize {
+    let mut i = after_keyword;
+    let mut in_quote: Option<u8> = None;
+    let mut paren_depth: usize = 0;
+
+    while i < css_bytes.len() {
+        let b = css_bytes[i];
+        if let Some(q) = in_quote {
+            if b == b'\\' {
+                i = (i + 2).min(css_bytes.len());
+                continue;
+            }
+            if b == q {
+                in_quote = None;
+            }
+            i += 1;
+            continue;
+        }
+
+        match b {
+            b'\'' | b'"' => in_quote = Some(b),
+            b'(' => paren_depth += 1,
+            b')' => paren_depth = paren_depth.saturating_sub(1),
+            b';' if paren_depth == 0 => return i + 1,
+            b'\n' | b'\r' if paren_depth == 0 => return i,
+            _ => {}
+        }
+        i += 1;
+    }
+    css_bytes.len()
+}
+
+fn strip_external_font_imports_in_css(css: &str) -> String {
+    let lower = css.to_ascii_lowercase();
+    let bytes = css.as_bytes();
+    let mut out = String::with_capacity(css.len());
+    let mut cursor = 0;
+
+    while cursor < css.len() {
+        let Some(rel_start) = lower[cursor..].find("@import") else {
+            out.push_str(&css[cursor..]);
+            break;
+        };
+        let start = cursor + rel_start;
+        let after_kw = start + 7;
+        let valid_sep = bytes
+            .get(after_kw)
+            .is_some_and(|b| b.is_ascii_whitespace() || matches!(b, b'(' | b'\'' | b'"'));
+        if !valid_sep {
+            out.push_str(&css[cursor..after_kw]);
+            cursor = after_kw;
+            continue;
+        }
+
+        out.push_str(&css[cursor..start]);
+        let end = find_at_import_end(bytes, after_kw);
+        let stmt_lower = &lower[start..end];
+        let is_external_font = stmt_lower.contains("//fonts.")
+            || stmt_lower.contains("fonts.googleapis.com")
+            || stmt_lower.contains("fonts.gstatic.com")
+            || (stmt_lower.contains("//") && stmt_lower.contains("font"));
+        if !is_external_font {
+            out.push_str(&css[start..end]);
+        }
+        cursor = end;
+    }
+
+    out
+}
+
+/// Remove protocol-relative / external font `@import` rules inside `<style>` blocks.
+fn strip_external_font_imports_in_styles_ci(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let mut out = String::with_capacity(html.len());
+    let mut cursor = 0;
+
+    while cursor < html.len() {
+        let Some(rel_start) = lower[cursor..].find("<style") else {
+            out.push_str(&html[cursor..]);
+            break;
+        };
+        let start = cursor + rel_start;
+        let after_name = start + 6;
+        if !is_tag_boundary(lower.as_bytes().get(after_name).copied()) {
+            out.push_str(&html[cursor..after_name]);
+            cursor = after_name;
+            continue;
+        }
+
+        let Some(rel_open_end) = lower[after_name..].find('>') else {
+            out.push_str(&html[cursor..]);
+            break;
+        };
+        let content_start = after_name + rel_open_end + 1;
+        out.push_str(&html[cursor..content_start]);
+
+        let mut search_from = content_start;
+        let mut close_start = None;
+        while search_from < lower.len() {
+            let Some(rel_close) = lower[search_from..].find("</style") else {
+                break;
+            };
+            let pos = search_from + rel_close;
+            let after_close = pos + 7;
+            if is_tag_boundary(lower.as_bytes().get(after_close).copied()) {
+                close_start = Some(pos);
+                break;
+            }
+            search_from = after_close;
+        }
+
+        match close_start {
+            Some(end) => {
+                out.push_str(&strip_external_font_imports_in_css(
+                    &html[content_start..end],
+                ));
+                cursor = end;
+            }
+            None => {
+                out.push_str(&strip_external_font_imports_in_css(&html[content_start..]));
+                cursor = html.len();
+            }
+        }
+    }
+
+    out
+}
+
 fn find_tag_open_end_ci(html: &str, tag: &str) -> Option<usize> {
     let lower = html.to_ascii_lowercase();
     let needle = format!("<{tag}");
@@ -223,6 +389,9 @@ fn find_tag_start_ci(html: &str, needle: &str) -> Option<usize> {
 }
 
 const PORTAL_VIEW_STYLE: &str = r#"<style id="absen-gui-shot-style">
+* {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif !important;
+}
 :where(body) {
   margin: 0;
   padding: 14px 18px;
@@ -278,14 +447,6 @@ const PORTAL_VIEW_STYLE: &str = r#"<style id="absen-gui-shot-style">
 :where(.btn-warning) { background-color: #d97706; border-color: #b45309; color: #ffffff; }
 :where(.btn-danger)  { background-color: #dc2626; border-color: #b91c1c; color: #ffffff; }
 :where(.btn-default) { background-color: #e2e8f0; border-color: #cbd5e1; color: #334155; }
-.main-sidebar, aside.main-sidebar, .sidebar, .left-side, .main-footer, .control-sidebar, .breadcrumb, .navbar-toggle {
-  display: none !important;
-}
-.content-wrapper, .right-side {
-  margin-left: 0 !important;
-  padding: 14px 18px !important;
-  min-height: auto !important;
-}
 #absen-gui-stamp {
   margin-top: 12px;
   padding: 8px 12px;
@@ -307,6 +468,8 @@ pub fn prepare_attendance_section_html(
     let mut cleaned = strip_tag_block_ci(&snapshot.html, "script");
     cleaned = strip_tag_block_ci(&cleaned, "iframe");
     cleaned = strip_meta_refresh_ci(&cleaned);
+    cleaned = strip_external_font_links_ci(&cleaned);
+    cleaned = strip_external_font_imports_in_styles_ci(&cleaned);
 
     let mut head_injection = String::new();
     if let Some(safe_base) = sanitize_base_url(&snapshot.base_url) {
@@ -900,6 +1063,29 @@ fn capture_with_chromium_cdp(
         deadline,
     );
     req_id += 1;
+
+    // Wait for document.fonts.ready (bounded by a short timeout) so text never captures mid-FOIT.
+    let fonts_rem_ms = deadline
+        .saturating_duration_since(Instant::now())
+        .min(Duration::from_millis(1500))
+        .as_millis() as u64;
+    if fonts_rem_ms > 50 {
+        let wait_ms = fonts_rem_ms.saturating_sub(20);
+        let expr = format!(
+            "Promise.race([(document.fonts && document.fonts.ready) ? document.fonts.ready.catch(function(){{}}) : Promise.resolve(), new Promise(function(r){{ setTimeout(r, {wait_ms}); }})])"
+        );
+        let _ = cdp_call(
+            &mut ws,
+            req_id,
+            "Runtime.evaluate",
+            serde_json::json!({
+                "expression": expr,
+                "awaitPromise": true
+            }),
+            deadline,
+        );
+        req_id += 1;
+    }
 
     let shot_res = cdp_call(
         &mut ws,
@@ -1692,6 +1878,14 @@ mod tests {
   <META HTTP-EQUIV="Refresh" CONTENT="0;url=/laman/login">
   <meta http-equiv='refresh' content='5;url=/login'>
   <meta charset="utf-8">
+  <link rel="stylesheet" href="//fonts.googleapis.com/css?family=Source+Sans+Pro:300,400,600">
+  <link rel="stylesheet" href="https://fonts.gstatic.com/s/sourcesanspro/font.css">
+  <link rel="stylesheet" href="assets/dist/css/AdminLTE.min.css">
+  <style>
+    @import url(//fonts.googleapis.com/css?family=Source+Sans+Pro:300,400,600,700);
+    @IMPORT "https://fonts.googleapis.com/css?family=Roboto";
+    .box { border-radius: 3px; }
+  </style>
   <SCRIPT type="text/javascript">window.location = '/laman/login';</SCRIPT>
 </head>
 <body>
@@ -1740,10 +1934,16 @@ mod tests {
         assert!(!lower.contains("<iframe"));
         assert!(!lower.contains("http-equiv=\"refresh\""));
         assert!(!lower.contains("http-equiv='refresh'"));
+        assert!(!lower.contains("fonts.googleapis.com"));
+        assert!(!lower.contains("fonts.gstatic.com"));
+        assert!(out.contains(r#"<link rel="stylesheet" href="assets/dist/css/AdminLTE.min.css">"#));
+        assert!(out.contains(".box { border-radius: 3px; }"));
         assert!(out.contains("<meta charset=\"utf-8\">"));
         assert!(out.contains(r#"<base href="https://akademik.polban.ac.id/">"#));
         assert!(out.contains("absen-gui-shot-style"));
-        assert!(out.contains("display: none !important"));
+        assert!(out.contains(r#"font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif !important;"#));
+        assert!(!out.contains("display: none !important"));
+        assert!(!out.contains("margin-left: 0 !important"));
         assert!(out.contains("PRF-20261121-1234ABCD"));
         assert!(out.contains("https://akademik.polban.ac.id/ajar/absen"));
         assert!(!out.contains('\u{2014}'));

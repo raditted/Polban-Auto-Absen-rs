@@ -650,7 +650,7 @@ fn run_with_commands_scan_now_triggers_immediate_cycle_and_stop_exits() {
 }
 
 #[test]
-fn direct_post_success_emits_post_accepted_proof_without_extra_get() {
+fn direct_post_success_refetches_schedule_and_falls_back_to_post_accepted_when_still_blue() {
     let server = MockServer::start();
     let state_path = temp_state_path("proof_direct");
     let cfg = test_config(&server.base_url(), state_path.clone());
@@ -675,7 +675,7 @@ fn direct_post_success_emits_post_accepted_proof_without_extra_get() {
     let (_tx, rx) = mpsc::channel();
     run(&cfg, &client, false, &reporter, &rx).unwrap();
 
-    m_get.assert_hits(1);
+    m_get.assert_hits(2);
     m_post.assert_hits(1);
 
     let proofs: Vec<_> = reporter
@@ -707,6 +707,102 @@ fn direct_post_success_emits_post_accepted_proof_without_extra_get() {
 
     let store = ProofStore::load(proof_path_for(&state_path));
     assert_eq!(store.len(), 1);
+
+    let _ = std::fs::remove_dir_all(state_path.parent().unwrap());
+}
+
+#[test]
+fn direct_post_success_refetches_green_schedule_and_emits_portal_verified() {
+    let server = MockServer::start();
+    let state_path = temp_state_path("proof_direct_green");
+    let cfg = test_config(&server.base_url(), state_path.clone());
+    let client = AbsenClient::new(&cfg.base_url).unwrap();
+
+    server.mock(|when, then| {
+        when.method(POST).path("/laman/login");
+        then.status(200).body("ok");
+    });
+    let m_blue = server.mock(|when, then| {
+        when.method(GET).path("/ajar/absen");
+        then.status(200).body(JADWAL_ONE_BLUE_HTML);
+    });
+    let m_post = server.mock(|when, then| {
+        when.method(POST).path("/ajar/absen/absensi_awal");
+        then.status(200)
+            .header("Date", "Sat, 21 Nov 2026 00:10:00 GMT")
+            .body(r#"{"status":"ok"}"#);
+    });
+
+    struct SwapBeforeVerify<'a> {
+        server: &'a MockServer,
+        m_blue: Mutex<Option<httpmock::Mock<'a>>>,
+        m_green: Mutex<Option<httpmock::Mock<'a>>>,
+        events: Mutex<Vec<Event>>,
+    }
+    impl<'a> Reporter for SwapBeforeVerify<'a> {
+        fn emit(&self, event: Event) {
+            if let Event::Log { code, message, .. } = &event {
+                if code == "ABSEN" && message.starts_with("target:") {
+                    if let Some(mut m) = self.m_blue.lock().unwrap().take() {
+                        m.assert_hits(1);
+                        m.delete();
+                        let green = self.server.mock(|when, then| {
+                            when.method(GET).path("/ajar/absen");
+                            then.status(200).body(JADWAL_GREEN_HTML);
+                        });
+                        *self.m_green.lock().unwrap() = Some(green);
+                    }
+                }
+            }
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    let reporter = SwapBeforeVerify {
+        server: &server,
+        m_blue: Mutex::new(Some(m_blue)),
+        m_green: Mutex::new(None),
+        events: Mutex::new(Vec::new()),
+    };
+    let (_tx, rx) = mpsc::channel();
+    run(&cfg, &client, false, &reporter, &rx).unwrap();
+
+    m_post.assert_hits(1);
+    reporter
+        .m_green
+        .lock()
+        .unwrap()
+        .as_ref()
+        .expect("green mock installed")
+        .assert_hits(1);
+
+    let events = reporter.events.lock().unwrap();
+    let snapshots: Vec<PortalPageSnapshot> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::PortalSnapshot(s) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(snapshots.len(), 2);
+    assert!(!snapshots[0].has_green_row);
+    assert!(snapshots[1].has_green_row);
+    assert_eq!(snapshots[1].html, JADWAL_GREEN_HTML);
+
+    let proofs: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::AttendanceProof(p) => Some(p),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(proofs.len(), 1);
+    assert_eq!(proofs[0].verification, ProofVerification::PortalVerified);
+    assert_eq!(
+        proofs[0].server_button_label.as_deref(),
+        Some("Sudah Absen")
+    );
+    assert!(proofs[0].verified_at.is_some());
 
     let _ = std::fs::remove_dir_all(state_path.parent().unwrap());
 }
@@ -821,17 +917,17 @@ fn next_scan_seeing_green_upgrades_post_accepted_to_portal_verified_once() {
     }
     impl<'a> Reporter for MultiCycleUpgrade<'a> {
         fn emit(&self, event: Event) {
-            if matches!(event, Event::LastScan(_)) {
+            if matches!(event, Event::AttendanceProof(_)) {
+                if let Some(mut m) = self.m_blue.lock().unwrap().take() {
+                    m.delete();
+                    self.server.mock(|when, then| {
+                        when.method(GET).path("/ajar/absen");
+                        then.status(200).body(JADWAL_GREEN_HTML);
+                    });
+                }
+            } else if matches!(event, Event::LastScan(_)) {
                 let c = self.cycles.fetch_add(1, Ordering::SeqCst) + 1;
-                if c == 1 {
-                    if let Some(mut m) = self.m_blue.lock().unwrap().take() {
-                        m.delete();
-                        self.server.mock(|when, then| {
-                            when.method(GET).path("/ajar/absen");
-                            then.status(200).body(JADWAL_GREEN_HTML);
-                        });
-                    }
-                } else if c >= 3 {
+                if c >= 3 {
                     let _ = self.shutdown_tx.send(());
                 }
             }
