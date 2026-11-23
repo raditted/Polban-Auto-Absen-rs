@@ -15,9 +15,13 @@ use sha2::{Digest, Sha256};
 /// Current application version embedded at compile time.
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// GitHub Releases latest endpoint for this repository.
+/// GitHub Releases latest API endpoint for this repository.
 pub const DEFAULT_RELEASE_API_URL: &str =
     "https://api.github.com/repos/raditted/Polban-Auto-Absen-rs/releases/latest";
+
+/// GitHub Releases latest web URL (rate-limit-free fallback when REST API returns 403/429).
+pub const DEFAULT_RELEASE_WEB_URL: &str =
+    "https://github.com/raditted/Polban-Auto-Absen-rs/releases/latest";
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
@@ -549,24 +553,265 @@ fn build_http_client(timeout: Duration) -> Result<reqwest::blocking::Client, Str
         .map_err(|e| format!("Gagal inisialisasi klien HTTP: {e}"))
 }
 
-/// Query GitHub Releases JSON at `api_url` and return whether a newer version is available.
+fn build_no_redirect_http_client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(format!("polban-absen-gui/{CURRENT_VERSION}"))
+        .build()
+        .map_err(|e| format!("Gagal inisialisasi klien HTTP: {e}"))
+}
+
+fn url_origin(url: &reqwest::Url) -> Option<String> {
+    let host = url.host_str()?;
+    match url.port() {
+        Some(port) => Some(format!("{}://{host}:{port}", url.scheme())),
+        None => Some(format!("{}://{host}", url.scheme())),
+    }
+}
+
+fn is_web_releases_latest_url(raw_url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(raw_url) else {
+        return false;
+    };
+    let host = parsed.host_str().unwrap_or("");
+    let path = parsed.path().trim_end_matches('/');
+    (host.eq_ignore_ascii_case("github.com") || host.eq_ignore_ascii_case("www.github.com"))
+        && path.ends_with("/releases/latest")
+}
+
+/// Derive the rate-limit-free web `.../releases/latest` URL from a GitHub Releases API URL.
+pub fn derive_web_releases_url(api_url: &str) -> Option<String> {
+    if is_web_releases_latest_url(api_url) {
+        return Some(api_url.to_string());
+    }
+    let parsed = reqwest::Url::parse(api_url).ok()?;
+    let trimmed_path = parsed.path().trim_end_matches('/');
+    let rest = trimmed_path.strip_prefix("/repos/")?;
+    let repo_prefix = rest.strip_suffix("/releases/latest")?;
+    let mut parts = repo_prefix.split('/');
+    let owner = parts.next().filter(|s| !s.is_empty())?;
+    let repo = parts.next().filter(|s| !s.is_empty())?;
+    if parts.next().is_some() {
+        return None;
+    }
+
+    if parsed
+        .host_str()
+        .is_some_and(|h| h.eq_ignore_ascii_case("api.github.com"))
+    {
+        Some(format!("https://github.com/{owner}/{repo}/releases/latest"))
+    } else {
+        let origin = url_origin(&parsed)?;
+        Some(format!("{origin}/{owner}/{repo}/releases/latest"))
+    }
+}
+
+/// Extract `(tag_name, release_url, download_base_url)` from a `.../releases/tag/<tag>` URL.
+fn parse_release_tag_url(url: &reqwest::Url) -> Option<(String, String, String)> {
+    let path = url.path();
+    let idx = path.find("/releases/tag/")?;
+    let repo_prefix = &path[..idx];
+    let after = &path[idx + "/releases/tag/".len()..];
+    let tag = after.split('/').next()?.trim();
+    if tag.is_empty() {
+        return None;
+    }
+    let origin = url_origin(url)?;
+    let release_url = format!("{origin}{repo_prefix}/releases/tag/{tag}");
+    let download_base = format!("{origin}{repo_prefix}/releases/download/{tag}");
+    Some((tag.to_string(), release_url, download_base))
+}
+
+fn resolve_latest_tag_via_web_redirect(
+    web_latest_url: &str,
+) -> Result<(String, String, String), String> {
+    let client = build_no_redirect_http_client(CHECK_TIMEOUT)?;
+    let mut current = reqwest::Url::parse(web_latest_url)
+        .map_err(|e| format!("URL fallback rilis tidak valid: {e}"))?;
+
+    for _hop in 0..5 {
+        if let Some(parsed) = parse_release_tag_url(&current) {
+            return Ok(parsed);
+        }
+
+        let resp = client
+            .get(current.clone())
+            .send()
+            .map_err(|e| format!("Gagal menghubungi halaman rilis GitHub: {e}"))?;
+        let status = resp.status();
+
+        if status.is_redirection() {
+            let loc = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| "Halaman rilis mengalihkan tanpa header Location.".to_string())?;
+            let next_url = current
+                .join(loc)
+                .map_err(|e| format!("Header Location rilis tidak valid: {e}"))?;
+            if let Some(parsed) = parse_release_tag_url(&next_url) {
+                return Ok(parsed);
+            }
+            current = next_url;
+            continue;
+        }
+
+        if status.is_success() {
+            if let Some(parsed) = parse_release_tag_url(resp.url()) {
+                return Ok(parsed);
+            }
+            return Err("Halaman rilis tidak mengarahkan ke tag versi terbaru.".to_string());
+        }
+
+        return Err(format!("Halaman rilis mengembalikan status HTTP {status}"));
+    }
+
+    Err("Terlalu banyak pengalihan saat memeriksa halaman rilis.".to_string())
+}
+
+fn discover_assets_from_web_release(
+    client: &reqwest::blocking::Client,
+    download_base: &str,
+    exe_dir_writable: bool,
+) -> (Vec<GitHubAsset>, Option<String>) {
+    let sums_url = format!("{download_base}/{SHA256SUMS_NAME}");
+    if let Ok(sums_resp) = client.get(&sums_url).send() {
+        if sums_resp.status().is_success() {
+            if let Ok(sums_text) = sums_resp.text() {
+                let map = parse_sha256sums(&sums_text);
+                if !map.is_empty() {
+                    let mut assets: Vec<GitHubAsset> = map
+                        .into_keys()
+                        .map(|name| GitHubAsset {
+                            browser_download_url: format!("{download_base}/{name}"),
+                            name,
+                            size: 0,
+                        })
+                        .collect();
+                    assets.sort_by(|a, b| a.name.cmp(&b.name));
+                    return (assets, Some(sums_url));
+                }
+            }
+        }
+    }
+
+    // Fallback when SHA256SUMS.txt is absent: probe known Windows assets via HTTP HEAD.
+    let mut probe_names = Vec::new();
+    if std::env::consts::OS == "windows" {
+        if exe_dir_writable {
+            probe_names.push(WINDOWS_PORTABLE_ZIP);
+        }
+        probe_names.push(WINDOWS_INSTALLER_EXE);
+    }
+
+    let mut probed = Vec::new();
+    for name in probe_names {
+        let asset_url = format!("{download_base}/{name}");
+        if let Ok(head_resp) = client.head(&asset_url).send() {
+            if head_resp.status().is_success() {
+                let size = head_resp.content_length().unwrap_or(0);
+                probed.push(GitHubAsset {
+                    name: name.to_string(),
+                    browser_download_url: asset_url,
+                    size,
+                });
+            }
+        }
+    }
+
+    (probed, None)
+}
+
+fn check_latest_release_via_web(
+    client: &reqwest::blocking::Client,
+    web_latest_url: &str,
+    current_version: &str,
+    exe_dir_writable: bool,
+) -> Result<CheckOutcome, String> {
+    let (tag_name, release_url, download_base) =
+        resolve_latest_tag_via_web_redirect(web_latest_url)?;
+    if !is_newer_version(&tag_name, current_version) {
+        return Ok(CheckOutcome::UpToDate);
+    }
+
+    let version = normalize_version_str(&tag_name);
+    let (assets, sha256sums_url) =
+        discover_assets_from_web_release(client, &download_base, exe_dir_writable);
+    let selected = select_release_asset(
+        &assets,
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        exe_dir_writable,
+    );
+
+    Ok(CheckOutcome::Available(UpdateCandidate {
+        version,
+        release_url,
+        strategy: selected.strategy,
+        asset: selected.asset,
+        sha256sums_url,
+    }))
+}
+
+/// Query GitHub Releases JSON at `api_url` (with automatic rate-limit web fallback on HTTP 403/429)
+/// and return whether a newer version is available.
 pub fn check_latest_release(
     api_url: &str,
     current_version: &str,
     exe_dir_writable: bool,
 ) -> Result<CheckOutcome, String> {
+    check_latest_release_with_fallback(api_url, None, current_version, exe_dir_writable)
+}
+
+/// Query GitHub Releases JSON at `api_url`, falling back to `web_fallback_url` (or derived web URL)
+/// when the REST API returns HTTP 403 or 429 due to rate limits.
+pub fn check_latest_release_with_fallback(
+    api_url: &str,
+    web_fallback_url: Option<&str>,
+    current_version: &str,
+    exe_dir_writable: bool,
+) -> Result<CheckOutcome, String> {
     let client = build_http_client(CHECK_TIMEOUT)?;
+
+    if is_web_releases_latest_url(api_url) {
+        return check_latest_release_via_web(&client, api_url, current_version, exe_dir_writable);
+    }
+
     let resp = client
         .get(api_url)
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .send()
         .map_err(|e| format!("Gagal menghubungi GitHub Releases: {e}"))?;
 
-    if !resp.status().is_success() {
+    let status = resp.status();
+    if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+    {
+        let fallback_url = web_fallback_url
+            .map(str::to_string)
+            .or_else(|| derive_web_releases_url(api_url));
+
+        if let Some(web_url) = fallback_url {
+            return check_latest_release_via_web(
+                &client,
+                &web_url,
+                current_version,
+                exe_dir_writable,
+            )
+            .map_err(|fallback_err| {
+                format!(
+                    "Batas akses GitHub API tercapai (HTTP {status}) dan pemeriksaan cadangan gagal: {fallback_err}"
+                )
+            });
+        }
+
         return Err(format!(
-            "Server mengembalikan status HTTP {}",
-            resp.status()
+            "Batas akses GitHub API tercapai (HTTP {status}). Silakan coba lagi beberapa saat lagi."
         ));
+    }
+
+    if !status.is_success() {
+        return Err(format!("Server mengembalikan status HTTP {status}"));
     }
 
     let body = resp
@@ -1260,5 +1505,282 @@ mod tests {
             let err = open_url_in_browser(bad).expect_err("unsafe URL must not spawn browser");
             assert!(err.contains("tidak valid"));
         }
+    }
+
+    #[test]
+    fn derive_web_releases_url_maps_github_and_mock_repo_urls() {
+        assert_eq!(
+            derive_web_releases_url(DEFAULT_RELEASE_API_URL).as_deref(),
+            Some(DEFAULT_RELEASE_WEB_URL)
+        );
+        assert_eq!(
+            derive_web_releases_url(
+                "http://127.0.0.1:8080/repos/raditted/Polban-Auto-Absen-rs/releases/latest"
+            )
+            .as_deref(),
+            Some("http://127.0.0.1:8080/raditted/Polban-Auto-Absen-rs/releases/latest")
+        );
+        assert_eq!(
+            derive_web_releases_url(DEFAULT_RELEASE_WEB_URL).as_deref(),
+            Some(DEFAULT_RELEASE_WEB_URL)
+        );
+        assert_eq!(
+            derive_web_releases_url("http://127.0.0.1:8080/releases/latest"),
+            None
+        );
+    }
+
+    #[test]
+    fn rate_limit_403_falls_back_to_web_redirect_and_sha256sums_discovery() {
+        let server = MockServer::start();
+        let zip_payload = build_zip_with_exe("Polban Presensi.exe", b"fallback-new-binary");
+        let good_sha = compute_sha256_hex(&zip_payload);
+        let sums_body = format!(
+            "{good_sha}  {WINDOWS_PORTABLE_ZIP}\n\
+             bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  {WINDOWS_INSTALLER_EXE}\n"
+        );
+
+        let api_mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/repos/raditted/Polban-Auto-Absen-rs/releases/latest");
+            then.status(403)
+                .header("X-RateLimit-Remaining", "0")
+                .body(r#"{"message":"API rate limit exceeded for 104.28.250.135"}"#);
+        });
+
+        let web_latest_mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/raditted/Polban-Auto-Absen-rs/releases/latest");
+            then.status(302).header(
+                "Location",
+                "/raditted/Polban-Auto-Absen-rs/releases/tag/v9.9.9",
+            );
+        });
+
+        let sums_mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/raditted/Polban-Auto-Absen-rs/releases/download/v9.9.9/SHA256SUMS.txt");
+            then.status(200).body(sums_body.clone());
+        });
+
+        let zip_mock = server.mock(|when, then| {
+            when.method(GET).path(format!(
+                "/raditted/Polban-Auto-Absen-rs/releases/download/v9.9.9/{WINDOWS_PORTABLE_ZIP}"
+            ));
+            then.status(200).body(zip_payload.clone());
+        });
+
+        let outcome = check_latest_release(
+            &server.url("/repos/raditted/Polban-Auto-Absen-rs/releases/latest"),
+            "3.2.1",
+            true,
+        )
+        .expect("403 rate limit should recover via web redirect fallback");
+
+        api_mock.assert();
+        web_latest_mock.assert();
+        sums_mock.assert();
+
+        let candidate = match outcome {
+            CheckOutcome::Available(c) => c,
+            other => panic!("expected Available, got {other:?}"),
+        };
+        assert_eq!(candidate.version, "9.9.9");
+        assert_eq!(
+            candidate.release_url,
+            server.url("/raditted/Polban-Auto-Absen-rs/releases/tag/v9.9.9")
+        );
+        assert_eq!(
+            candidate.sha256sums_url,
+            Some(
+                server
+                    .url("/raditted/Polban-Auto-Absen-rs/releases/download/v9.9.9/SHA256SUMS.txt")
+            )
+        );
+
+        if cfg!(target_os = "windows") {
+            assert_eq!(candidate.strategy, AssetStrategy::WindowsPortableZip);
+            assert_eq!(
+                candidate.asset.as_ref().map(|a| a.browser_download_url.as_str()),
+                Some(
+                    server
+                        .url(format!(
+                            "/raditted/Polban-Auto-Absen-rs/releases/download/v9.9.9/{WINDOWS_PORTABLE_ZIP}"
+                        ))
+                        .as_str()
+                )
+            );
+
+            let dir = make_temp_dir("fallback-e2e");
+            let exe_path = dir.join("Polban Presensi.exe");
+            fs::write(&exe_path, b"old-binary").expect("write dummy exe");
+            let plan = download_and_stage_candidate(&candidate, &exe_path, &dir, |_, _| {})
+                .expect("download from fallback candidate should verify and stage");
+            zip_mock.assert();
+            assert_eq!(
+                plan,
+                RestartPlan::ReplaceExecutable {
+                    current_exe: exe_path.clone(),
+                    staged_new: staged_new_path_for(&exe_path),
+                }
+            );
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn rate_limit_403_web_redirect_to_current_or_older_tag_returns_up_to_date() {
+        let server = MockServer::start();
+
+        let api_mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/repos/raditted/Polban-Auto-Absen-rs/releases/latest");
+            then.status(403).body("rate limit exceeded");
+        });
+        let web_mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/raditted/Polban-Auto-Absen-rs/releases/latest");
+            then.status(302).header(
+                "Location",
+                server.url("/raditted/Polban-Auto-Absen-rs/releases/tag/v3.2.1"),
+            );
+        });
+        let sums_mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/raditted/Polban-Auto-Absen-rs/releases/download/v3.2.1/SHA256SUMS.txt");
+            then.status(200).body("");
+        });
+
+        let outcome = check_latest_release(
+            &server.url("/repos/raditted/Polban-Auto-Absen-rs/releases/latest"),
+            "3.2.1",
+            true,
+        )
+        .expect("same tag via web fallback must succeed as UpToDate");
+
+        api_mock.assert();
+        web_mock.assert();
+        sums_mock.assert_hits(0);
+        assert_eq!(outcome, CheckOutcome::UpToDate);
+    }
+
+    #[test]
+    fn rate_limit_429_without_sha256sums_probes_head_or_falls_back_to_release_page() {
+        let server = MockServer::start();
+
+        server.mock(|when, then| {
+            when.method(GET)
+                .path("/repos/raditted/Polban-Auto-Absen-rs/releases/latest");
+            then.status(429).body("too many requests");
+        });
+        server.mock(|when, then| {
+            when.method(GET)
+                .path("/raditted/Polban-Auto-Absen-rs/releases/latest");
+            then.status(302).header(
+                "Location",
+                "/raditted/Polban-Auto-Absen-rs/releases/tag/v9.9.9",
+            );
+        });
+        server.mock(|when, then| {
+            when.method(GET)
+                .path("/raditted/Polban-Auto-Absen-rs/releases/download/v9.9.9/SHA256SUMS.txt");
+            then.status(404);
+        });
+        let head_zip = server.mock(|when, then| {
+            when.method(httpmock::Method::HEAD).path(format!(
+                "/raditted/Polban-Auto-Absen-rs/releases/download/v9.9.9/{WINDOWS_PORTABLE_ZIP}"
+            ));
+            then.status(200).header("content-length", "12345");
+        });
+
+        let outcome = check_latest_release(
+            &server.url("/repos/raditted/Polban-Auto-Absen-rs/releases/latest"),
+            "3.2.1",
+            true,
+        )
+        .expect("429 fallback without SHA256SUMS should succeed");
+
+        let candidate = match outcome {
+            CheckOutcome::Available(c) => c,
+            other => panic!("expected Available, got {other:?}"),
+        };
+        assert_eq!(candidate.version, "9.9.9");
+        assert!(candidate.sha256sums_url.is_none());
+        if cfg!(target_os = "windows") {
+            head_zip.assert();
+            assert_eq!(candidate.strategy, AssetStrategy::WindowsPortableZip);
+            assert_eq!(
+                candidate
+                    .asset
+                    .as_ref()
+                    .map(|a| a.browser_download_url.as_str()),
+                Some(
+                    server
+                        .url(format!(
+                            "/raditted/Polban-Auto-Absen-rs/releases/download/v9.9.9/{WINDOWS_PORTABLE_ZIP}"
+                        ))
+                        .as_str()
+                )
+            );
+        }
+
+        // Now test when no assets are confirmed via HEAD -> safely returns OpenReleasePage.
+        let server2 = MockServer::start();
+        server2.mock(|when, then| {
+            when.method(GET).path("/api/latest");
+            then.status(403);
+        });
+        server2.mock(|when, then| {
+            when.method(GET).path("/web/latest");
+            then.status(302).header(
+                "Location",
+                "/raditted/Polban-Auto-Absen-rs/releases/tag/v9.9.9",
+            );
+        });
+        let outcome2 = check_latest_release_with_fallback(
+            &server2.url("/api/latest"),
+            Some(&server2.url("/web/latest")),
+            "3.2.1",
+            true,
+        )
+        .expect("missing assets must safely fall back to OpenReleasePage");
+        let candidate2 = match outcome2 {
+            CheckOutcome::Available(c) => c,
+            other => panic!("expected Available, got {other:?}"),
+        };
+        assert_eq!(candidate2.strategy, AssetStrategy::OpenReleasePage);
+        assert!(candidate2.asset.is_none());
+    }
+
+    #[test]
+    fn rate_limit_403_and_fallback_failure_returns_clear_indonesian_error() {
+        let server = MockServer::start();
+
+        server.mock(|when, then| {
+            when.method(GET)
+                .path("/repos/raditted/Polban-Auto-Absen-rs/releases/latest");
+            then.status(403).body("rate limit exceeded");
+        });
+        server.mock(|when, then| {
+            when.method(GET)
+                .path("/raditted/Polban-Auto-Absen-rs/releases/latest");
+            then.status(502).body("bad gateway");
+        });
+
+        let err = check_latest_release(
+            &server.url("/repos/raditted/Polban-Auto-Absen-rs/releases/latest"),
+            "3.2.1",
+            true,
+        )
+        .expect_err("expected error when both API 403 and web fallback fail");
+
+        assert!(
+            err.contains("Batas akses GitHub API tercapai") && err.contains("403"),
+            "unexpected error message: {err}"
+        );
+        assert!(
+            err.contains("502"),
+            "expected fallback status in error: {err}"
+        );
     }
 }

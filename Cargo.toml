@@ -3,7 +3,7 @@ members = ["crates/absen-core", "crates/absen-cli", "crates/absen-gui"]
 resolver = "2"
 
 [workspace.package]
-version = "3.2.1"
+version = "3.2.2"
 edition = "2021"
 license = "MIT"
 authors = ["raditted <radithya.syabil@gmail.com>", "Haikal"]
