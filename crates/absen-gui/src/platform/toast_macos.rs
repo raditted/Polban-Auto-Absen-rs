@@ -683,6 +683,7 @@ fn handle_toast_click(toast_id: u64, open_main_window: bool) {
             cb();
         }
         if let Some(mtm) = MainThreadMarker::new() {
+            #[allow(deprecated)]
             NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
         }
     }
