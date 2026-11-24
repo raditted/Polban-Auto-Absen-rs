@@ -12,7 +12,8 @@ Oleh [raditted](https://github.com/raditted), berdasarkan proyek asli oleh Haika
    - Windows (disarankan): `Polban-Presensi-Setup-Windows-x64.exe` (Installer)
    - Windows (portable): `Polban-Presensi-Portable-Windows-x64.zip` (ekstrak, lalu klik 2x `Polban Presensi.exe`)
    - macOS: `Polban-Presensi-macOS-AppleSilicon.zip` (Mac M1/M2/M3/M4) atau `Polban-Presensi-macOS-Intel.zip` (Mac Intel)
-   - Linux: `Polban-Presensi-Linux-x64.tar.gz`
+   - Linux (Fedora / RPM): `Polban-Presensi-Fedora-x64.rpm`
+   - Linux (umum / tarball): `Polban-Presensi-Linux-x64.tar.gz`
 
 ## Cara Menginstall dan Menjalankan (Desktop GUI)
 
@@ -21,7 +22,8 @@ Oleh [raditted](https://github.com/raditted), berdasarkan proyek asli oleh Haika
 - **Windows (Installer):** klik 2x `Polban-Presensi-Setup-Windows-x64.exe` lalu ikuti langkah instalasi hingga selesai. Jika muncul jendela biru Windows SmartScreen (*Windows protected your PC*), klik **More info**, lalu klik **Run anyway**.
 - **Windows (Portable):** ekstrak `Polban-Presensi-Portable-Windows-x64.zip` ke folder pilihan Anda, lalu klik 2x `Polban Presensi.exe`.
 - **macOS:** ekstrak file `.zip` sesuai arsitektur Mac Anda, lalu pindahkan `Polban Presensi.app` ke folder `Applications`.
-- **Linux:** ekstrak `Polban-Presensi-Linux-x64.tar.gz`, lalu jalankan binary `polban-absen-gui`.
+- **Linux (Fedora / RPM):** jalankan `sudo dnf install ./Polban-Presensi-Fedora-x64.rpm`, lalu buka **Polban Presensi** dari launcher aplikasi atau jalankan `polban-absen-gui`.
+- **Linux (tarball):** ekstrak `Polban-Presensi-Linux-x64.tar.gz`, lalu jalankan binary `polban-absen-gui`.
 
 ### 2. Isi akun akademik
 

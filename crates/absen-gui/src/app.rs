@@ -237,6 +237,8 @@ impl AppCore {
         self.settings.theme = self.prefs.theme;
         self.settings.light_preset = self.prefs.light_preset;
         self.settings.dark_preset = self.prefs.dark_preset;
+        self.settings.notifications_enabled = self.prefs.notifications_enabled;
+        self.settings.notification_sound = self.prefs.notification_sound;
         self.settings.open = true;
     }
 
@@ -294,7 +296,11 @@ impl AppCore {
         self.settings.theme = self.prefs.theme;
         self.settings.light_preset = self.prefs.light_preset;
         self.settings.dark_preset = self.prefs.dark_preset;
-        apply_appearance(ctx, self.prefs_appearance());
+        self.settings.notifications_enabled = self.prefs.notifications_enabled;
+        self.settings.notification_sound = self.prefs.notification_sound;
+        let palette = apply_appearance(ctx, self.prefs_appearance());
+        self.notifier.set_palette(*palette);
+        self.controller.set_notifier(self.notifier.clone());
     }
 
     fn toggle_theme(&mut self, ctx: &egui::Context) {
@@ -305,8 +311,42 @@ impl AppCore {
             ThemePreference::Dark
         };
         self.settings.theme = self.prefs.theme;
-        apply_appearance(ctx, self.prefs_appearance());
+        let palette = apply_appearance(ctx, self.prefs_appearance());
+        self.notifier.set_palette(*palette);
+        self.controller.set_notifier(self.notifier.clone());
         self.persist_prefs();
+    }
+
+    fn handle_test_notification(&mut self, ctx: &egui::Context) {
+        let system_dark = ctx
+            .input(|i| i.raw.system_theme)
+            .map(|t| t == egui::Theme::Dark)
+            .unwrap_or(false);
+        let palette = *ThemeTokens::resolve_appearance(self.settings.appearance(), system_dark);
+        if self.notifier.is_recorded() {
+            self.notifier.set_palette(palette);
+            self.notifier
+                .set_sound_enabled(self.settings.notification_sound);
+            self.notifier.notify_test();
+        } else if !self.headless {
+            let mut live = Notifier::new(true);
+            live.set_sound_enabled(self.settings.notification_sound);
+            live.set_palette(palette);
+            #[cfg(target_os = "windows")]
+            live.set_wake_hwnd(self.win32_msg_hwnd);
+            if let Some(cb) = self.notifier.wake_callback() {
+                live.set_wake_callback(cb);
+            }
+            live.notify_test();
+        }
+        #[cfg(target_os = "windows")]
+        let status_msg = "Notifikasi uji ditampilkan di pojok kanan bawah.";
+        #[cfg(target_os = "macos")]
+        let status_msg = "Notifikasi uji ditampilkan di pojok kanan atas.";
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        let status_msg = "Notifikasi uji dikirim ke sistem.";
+        self.settings.status_message = Some(status_msg.to_string());
+        self.settings.status_is_error = false;
     }
 
     fn resolve_password(&self) -> String {
@@ -1034,9 +1074,14 @@ impl AppCore {
                 autostart_err = Some(e);
             }
         }
+        let palette = apply_appearance(ctx, self.prefs_appearance());
         self.notifier.set_enabled(self.prefs.notifications_enabled);
+        self.notifier
+            .set_sound_enabled(self.prefs.notification_sound);
+        self.notifier.set_palette(*palette);
+        #[cfg(target_os = "windows")]
+        self.notifier.set_wake_hwnd(self.win32_msg_hwnd);
         self.controller.set_notifier(self.notifier.clone());
-        apply_appearance(ctx, self.prefs_appearance());
         if let Some(err) = autostart_err {
             self.settings.status_message = Some(format!(
                 "Pengaturan tersimpan, namun gagal mengatur autostart: {err}"
@@ -1449,7 +1494,12 @@ impl AppCore {
                     self.handle_export_diagnostic_html(ctx);
                 }
                 SettingsAction::PreviewTheme(appearance) => {
-                    apply_appearance(ctx, appearance);
+                    let palette = apply_appearance(ctx, appearance);
+                    self.notifier.set_palette(*palette);
+                    self.controller.set_notifier(self.notifier.clone());
+                }
+                SettingsAction::TestNotification => {
+                    self.handle_test_notification(ctx);
                 }
                 SettingsAction::CheckForUpdates => {
                     self.updater.start_manual_check(ctx);
@@ -1478,7 +1528,7 @@ impl DesktopApp {
         configure_fonts(&cc.egui_ctx);
 
         let mut prefs = prefs::load().unwrap_or_default();
-        apply_appearance(
+        let initial_palette = apply_appearance(
             &cc.egui_ctx,
             AppearanceConfig {
                 mode: prefs.theme,
@@ -1504,7 +1554,9 @@ impl DesktopApp {
         };
 
         let settings = SettingsState::from_prefs(&prefs, initial_password);
-        let notifier = Notifier::new(prefs.notifications_enabled);
+        let mut notifier = Notifier::new(prefs.notifications_enabled);
+        notifier.set_sound_enabled(prefs.notification_sound);
+        notifier.set_palette(*initial_palette);
         let tray = TrayManager::new().ok();
 
         let mut controller = EngineController::new();
@@ -1613,6 +1665,22 @@ impl DesktopApp {
             #[cfg(target_os = "windows")]
             {
                 c.win32_msg_hwnd = win32_msg_hwnd;
+                c.notifier.set_wake_hwnd(win32_msg_hwnd);
+                let synced_notifier = c.notifier.clone();
+                c.controller.set_notifier(synced_notifier);
+            }
+
+            #[cfg(target_os = "macos")]
+            {
+                let toast_ctx = cc.egui_ctx.clone();
+                c.notifier.set_wake_callback(Arc::new(move || {
+                    toast_ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    toast_ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    toast_ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    toast_ctx.request_repaint();
+                }));
+                let synced_notifier = c.notifier.clone();
+                c.controller.set_notifier(synced_notifier);
             }
 
             let waker_ctx = cc.egui_ctx.clone();
@@ -1656,7 +1724,7 @@ impl DesktopApp {
         creds: Box<dyn CredentialStore>,
     ) -> Self {
         configure_fonts(ctx);
-        apply_appearance(
+        let initial_palette = apply_appearance(
             ctx,
             AppearanceConfig {
                 mode: prefs.theme,
@@ -1676,7 +1744,9 @@ impl DesktopApp {
         };
 
         let settings = SettingsState::from_prefs(&prefs, initial_password);
-        let notifier = Notifier::new(prefs.notifications_enabled);
+        let mut notifier = Notifier::new(prefs.notifications_enabled);
+        notifier.set_sound_enabled(prefs.notification_sound);
+        notifier.set_palette(*initial_palette);
         let autostart = AutostartManager::new("Polban Presensi");
         let mut controller = EngineController::new();
         controller.set_notifier(notifier.clone());
@@ -2025,7 +2095,7 @@ mod tests {
         assert!(!app1.core.borrow().controller.is_window_visible());
         let events1 = log1.lock().unwrap().clone();
         assert_eq!(events1.len(), 1);
-        assert_eq!(events1[0].0, "Polban Presensi");
+        assert_eq!(events1[0].0, "Berjalan di Latar Belakang");
         assert!(events1[0].1.contains("system tray"));
 
         // 2. minimize_to_tray == false -> does NOT send close-to-tray notification.

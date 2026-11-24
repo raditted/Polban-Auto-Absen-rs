@@ -61,6 +61,16 @@ bash run.sh
 
 ## Aplikasi Desktop (Linux)
 
+- **Fedora (RPM, disarankan):** unduh `Polban-Presensi-Fedora-x64.rpm` dari [GitHub Releases](https://github.com/raditted/Polban-Auto-Absen-rs/releases/latest) lalu pasang lewat DNF:
+  ```bash
+  sudo dnf install ./Polban-Presensi-Fedora-x64.rpm
+  ```
+  Paket RPM memasang binary ke `/usr/bin/polban-absen-gui`, ikon, serta shortcut aplikasi **Polban Presensi** otomatis. Untuk memperbarui versi ke depannya, jalankan `sudo dnf upgrade ./Polban-Presensi-Fedora-x64.rpm`.
+- Jika membangun `polban-absen-gui` dari source di Fedora, pasang paket development berikut:
+  ```bash
+  sudo dnf install -y gtk3-devel libayatana-appindicator-gtk3-devel \
+    libxkbcommon-devel libxcb-devel mesa-libGL-devel dbus-devel
+  ```
 - Jika membangun `polban-absen-gui` dari source di Ubuntu/Debian, pasang paket dependensi sistem terlebih dahulu:
   ```bash
   sudo apt-get update && sudo apt-get install -y \

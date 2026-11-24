@@ -39,6 +39,7 @@ pub struct SettingsState {
     pub minimize_to_tray: bool,
     pub autostart: bool,
     pub notifications_enabled: bool,
+    pub notification_sound: bool,
     pub auto_start_monitoring: bool,
     pub status_message: Option<String>,
     pub status_is_error: bool,
@@ -82,6 +83,7 @@ impl SettingsState {
             minimize_to_tray: prefs.minimize_to_tray,
             autostart: prefs.autostart,
             notifications_enabled: prefs.notifications_enabled,
+            notification_sound: prefs.notification_sound,
             auto_start_monitoring: prefs.auto_start_monitoring,
             status_message: None,
             status_is_error: false,
@@ -162,6 +164,7 @@ impl SettingsState {
         prefs.minimize_to_tray = self.minimize_to_tray;
         prefs.autostart = self.autostart;
         prefs.notifications_enabled = self.notifications_enabled;
+        prefs.notification_sound = self.notification_sound;
         prefs.auto_start_monitoring = self.auto_start_monitoring;
     }
 }
@@ -174,6 +177,7 @@ pub enum SettingsAction {
     ImportDotenv,
     ExportDiagnosticHtml,
     PreviewTheme(AppearanceConfig),
+    TestNotification,
     CheckForUpdates,
     StartUpdate,
     RestartToUpdate,
@@ -1055,6 +1059,13 @@ pub fn show(
                                             switch_row(
                                                 ui,
                                                 palette,
+                                                &mut state.notification_sound,
+                                                "Putar suara notifikasi",
+                                            );
+                                            hairline_divider(ui, palette.border_subtle);
+                                            switch_row(
+                                                ui,
+                                                palette,
                                                 &mut state.autostart,
                                                 "Jalankan otomatis saat login sistem operasi",
                                             );
@@ -1066,6 +1077,21 @@ pub fn show(
                                                 "Mulai pemantauan otomatis saat aplikasi dibuka",
                                             );
                                         });
+
+                                    ui.add_space(ThemeTokens::SPACE_SM);
+                                    if action_button(
+                                        ui,
+                                        palette,
+                                        ButtonTone::Secondary,
+                                        "Uji Notifikasi",
+                                        Some(icons::draw_bell),
+                                        true,
+                                        0.0,
+                                    )
+                                    .clicked()
+                                    {
+                                        action = Some(SettingsAction::TestNotification);
+                                    }
 
                                     ui.add_space(ThemeTokens::SPACE_LG);
                                     hairline_divider(ui, palette.border_subtle);

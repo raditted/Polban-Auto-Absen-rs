@@ -494,19 +494,28 @@ fn settings_modal_layout_alignment_backdrop_and_dismiss_across_viewports() {
 
             // Scroll modal body down to verify 2-column advanced fields align horizontally.
             if size.x >= 960.0 && size.y >= 800.0 {
-                let scrolled_out = run_frames(
-                    &ctx,
-                    &mut app,
-                    size,
-                    vec![
-                        Event::PointerMoved(screen_center),
-                        Event::MouseWheel {
-                            unit: egui::MouseWheelUnit::Point,
-                            delta: Vec2::new(0.0, -1600.0),
-                            modifiers: Modifiers::NONE,
-                        },
-                    ],
-                );
+                let mut scrolled_out = run_frames(&ctx, &mut app, size, Vec::new());
+                for _ in 0..12 {
+                    let rects = collect_text_rects(&scrolled_out);
+                    if find_text_rect(&rects, "Interval pemantauan").is_some()
+                        && find_text_rect(&rects, "Maks percobaan ulang").is_some()
+                    {
+                        break;
+                    }
+                    scrolled_out = run_frames(
+                        &ctx,
+                        &mut app,
+                        size,
+                        vec![
+                            Event::PointerMoved(screen_center),
+                            Event::MouseWheel {
+                                unit: egui::MouseWheelUnit::Point,
+                                delta: Vec2::new(0.0, -240.0),
+                                modifiers: Modifiers::NONE,
+                            },
+                        ],
+                    );
+                }
                 let scrolled_rects = collect_text_rects(&scrolled_out);
 
                 let r_interval = find_text_rect(&scrolled_rects, "Interval pemantauan")
@@ -518,19 +527,28 @@ fn settings_modal_layout_alignment_backdrop_and_dismiss_across_viewports() {
                     "{size:?}: 2-col row 1 misaligned: interval={r_interval:?}, retry={r_retry:?}"
                 );
 
-                let scrolled_more = run_frames(
-                    &ctx,
-                    &mut app,
-                    size,
-                    vec![
-                        Event::PointerMoved(screen_center),
-                        Event::MouseWheel {
-                            unit: egui::MouseWheelUnit::Point,
-                            delta: Vec2::new(0.0, -400.0),
-                            modifiers: Modifiers::NONE,
-                        },
-                    ],
-                );
+                let mut scrolled_more = scrolled_out;
+                for _ in 0..6 {
+                    let rects = collect_text_rects(&scrolled_more);
+                    if find_text_rect(&rects, "Jeda klik minimum").is_some()
+                        && find_text_rect(&rects, "Jeda klik maksimum").is_some()
+                    {
+                        break;
+                    }
+                    scrolled_more = run_frames(
+                        &ctx,
+                        &mut app,
+                        size,
+                        vec![
+                            Event::PointerMoved(screen_center),
+                            Event::MouseWheel {
+                                unit: egui::MouseWheelUnit::Point,
+                                delta: Vec2::new(0.0, -200.0),
+                                modifiers: Modifiers::NONE,
+                            },
+                        ],
+                    );
+                }
                 let scrolled_more_rects = collect_text_rects(&scrolled_more);
 
                 let r_dmin = find_text_rect(&scrolled_more_rects, "Jeda klik minimum")
@@ -1732,4 +1750,294 @@ fn proof_modal_screenshot_preview_zoom_save_and_empty_live_preview() {
     assert!(empty_text.contains("Lihat Contoh Bukti"));
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn settings_notification_sound_toggle_and_test_notification_button_render_without_overlap() {
+    let viewports = [
+        ("narrow_680", Vec2::new(680.0, 540.0)),
+        ("medium_960", Vec2::new(960.0, 640.0)),
+        ("desktop_1280", Vec2::new(1280.0, 800.0)),
+    ];
+
+    for theme in [ThemePreference::Light, ThemePreference::Dark] {
+        for (vp_name, size) in viewports {
+            let ctx = egui::Context::default();
+            let mut app = DesktopApp::new_headless(
+                &ctx,
+                configured_prefs(theme),
+                Box::new(MemoryFallbackStore::new()),
+            );
+            let (recorded, log) = absen_gui::platform::Notifier::new_recorded(true);
+            app.set_notifier_for_test(recorded);
+            app.set_test_snapshot(Some(sample_populated_snapshot()));
+
+            // Open Settings via Ctrl+,
+            let _ = run_frames(
+                &ctx,
+                &mut app,
+                size,
+                vec![Event::Key {
+                    key: Key::Comma,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::COMMAND,
+                }],
+            );
+            assert!(app.is_settings_open());
+
+            // 1. Scroll until "Tampilkan notifikasi sistem" & "Putar suara notifikasi" are comfortably clickable.
+            let center = Pos2::new(size.x * 0.5, size.y * 0.5);
+            let safe_click_bottom = size.y - 110.0;
+            let mut section_out = run_frames(&ctx, &mut app, size, Vec::new());
+            for _ in 0..14 {
+                let rects = collect_text_rects(&section_out);
+                if let (Some(_), Some(sound_r)) = (
+                    find_text_rect(&rects, "Tampilkan notifikasi sistem"),
+                    find_text_rect(&rects, "Putar suara notifikasi"),
+                ) {
+                    if sound_r.bottom() <= safe_click_bottom {
+                        break;
+                    }
+                }
+                section_out = run_frames(
+                    &ctx,
+                    &mut app,
+                    size,
+                    vec![
+                        Event::PointerMoved(center),
+                        Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: Vec2::new(0.0, -140.0),
+                            modifiers: Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+
+            assert_no_horizontal_overflow(
+                &section_out,
+                size.x,
+                &format!("settings_notify_switches_{vp_name}_{theme:?}"),
+            );
+            let rects = collect_text_rects(&section_out);
+            let notif_rect = find_text_rect(&rects, "Tampilkan notifikasi sistem")
+                .unwrap_or_else(|| panic!("{vp_name} ({theme:?}) missing notif toggle"));
+            let sound_rect = find_text_rect(&rects, "Putar suara notifikasi")
+                .unwrap_or_else(|| panic!("{vp_name} ({theme:?}) missing sound toggle"));
+            assert!(
+                !notif_rect.intersects(sound_rect),
+                "{vp_name} ({theme:?}): notif and sound toggles overlapped"
+            );
+            assert!(
+                sound_rect.top() > notif_rect.bottom(),
+                "{vp_name} ({theme:?}): sound toggle should sit below notification toggle"
+            );
+
+            // Toggle sound off.
+            let mut after_toggle = run_frames(&ctx, &mut app, size, click_at(sound_rect.center()));
+
+            // 2. Scroll further if needed until "Uji Notifikasi" is comfortably clickable.
+            for _ in 0..8 {
+                let r = collect_text_rects(&after_toggle);
+                if let (Some(_), Some(btn_r)) = (
+                    find_text_rect(&r, "Mulai pemantauan otomatis saat aplikasi dibuka"),
+                    find_text_rect(&r, "Uji Notifikasi"),
+                ) {
+                    if btn_r.bottom() <= safe_click_bottom {
+                        break;
+                    }
+                }
+                after_toggle = run_frames(
+                    &ctx,
+                    &mut app,
+                    size,
+                    vec![
+                        Event::PointerMoved(center),
+                        Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: Vec2::new(0.0, -140.0),
+                            modifiers: Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+
+            assert_no_horizontal_overflow(
+                &after_toggle,
+                size.x,
+                &format!("settings_notify_btn_{vp_name}_{theme:?}"),
+            );
+            let after_toggle_rects = collect_text_rects(&after_toggle);
+            let auto_mon_rect = find_text_rect(
+                &after_toggle_rects,
+                "Mulai pemantauan otomatis saat aplikasi dibuka",
+            )
+            .unwrap_or_else(|| panic!("{vp_name} ({theme:?}) missing auto-monitor toggle"));
+            let test_btn_rect = find_text_rect(&after_toggle_rects, "Uji Notifikasi")
+                .unwrap_or_else(|| panic!("{vp_name} ({theme:?}) missing Uji Notifikasi button"));
+            assert!(
+                !auto_mon_rect.intersects(test_btn_rect),
+                "{vp_name} ({theme:?}): Uji Notifikasi overlapped switches card"
+            );
+            assert!(
+                test_btn_rect.top() > auto_mon_rect.bottom(),
+                "{vp_name} ({theme:?}): Uji Notifikasi should sit below Integrasi Desktop switches"
+            );
+
+            // Click Uji Notifikasi and scroll to bottom status banner.
+            let mut after_test = run_frames(&ctx, &mut app, size, click_at(test_btn_rect.center()));
+            for _ in 0..10 {
+                if collect_rendered_text(&after_test)
+                    .contains("Notifikasi uji ditampilkan di pojok kanan bawah.")
+                {
+                    break;
+                }
+                after_test = run_frames(
+                    &ctx,
+                    &mut app,
+                    size,
+                    vec![
+                        Event::PointerMoved(center),
+                        Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: Vec2::new(0.0, -320.0),
+                            modifiers: Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+            let after_test_text = collect_rendered_text(&after_test);
+            assert!(
+                after_test_text.contains("Notifikasi uji ditampilkan di pojok kanan bawah."),
+                "{vp_name} ({theme:?}): expected test notification status banner"
+            );
+
+            let recorded_entries = log.lock().unwrap().clone();
+            assert_eq!(recorded_entries.len(), 1);
+            assert_eq!(recorded_entries[0].0, "Notifikasi Aktif!");
+            assert_eq!(recorded_entries[0].1, "Toast & suara siap digunakan.");
+
+            // Save Settings and confirm notification_sound persisted as false.
+            let save_rect = find_text_rect(&collect_text_rects(&after_test), "Simpan Pengaturan")
+                .expect("expected Simpan Pengaturan button");
+            let _ = run_frames(&ctx, &mut app, size, click_at(save_rect.center()));
+            assert!(!app.is_settings_open());
+            assert!(!app.prefs().notification_sound);
+        }
+    }
+}
+
+#[test]
+fn minecraft_toast_preview_composite_renders_all_three_kinds_cleanly() {
+    use absen_gui::platform::toast_render::{render_toast_card, ToastCardSpec, ToastKind};
+
+    let scale = 1.0_f32;
+    let items = [
+        (
+            ToastKind::Success,
+            "Presensi Berhasil!",
+            "Pengantar Rekayasa Perangkat Lunak",
+        ),
+        (
+            ToastKind::Info,
+            "Berjalan di Latar Belakang",
+            "Klik ikon di system tray.",
+        ),
+        (
+            ToastKind::Error,
+            "Login Portal Gagal!",
+            "Cek NIM & sandi di Pengaturan.",
+        ),
+    ];
+
+    let cards: Vec<_> = items
+        .iter()
+        .map(|(kind, title, body)| {
+            render_toast_card(
+                &ToastCardSpec {
+                    kind: *kind,
+                    title: (*title).to_string(),
+                    body: (*body).to_string(),
+                    progress: 1.0,
+                    close_hovered: false,
+                    palette: Palette::DARK,
+                },
+                scale,
+            )
+        })
+        .collect();
+
+    let pad_x = 36u32;
+    let pad_y = 28u32;
+    let gap_y = 18u32;
+    let max_card_w = cards.iter().map(|c| c.width).max().unwrap_or(600);
+    let total_w = max_card_w + pad_x * 2;
+    let total_h = cards.iter().map(|c| c.height).sum::<u32>()
+        + gap_y * (cards.len().saturating_sub(1) as u32)
+        + pad_y * 2;
+
+    // Subtle dark desktop gradient backdrop so the stepped black borders & pixel corners pop cleanly.
+    let mut composite = vec![0u8; (total_w as usize) * (total_h as usize) * 4];
+    for y in 0..total_h {
+        let t = y as f32 / total_h.max(1) as f32;
+        let r = (24.0 + t * 10.0).round() as u8;
+        let g = (31.0 + t * 14.0).round() as u8;
+        let b = (46.0 + t * 18.0).round() as u8;
+        for x in 0..total_w {
+            let idx = ((y * total_w + x) as usize) * 4;
+            composite[idx] = r;
+            composite[idx + 1] = g;
+            composite[idx + 2] = b;
+            composite[idx + 3] = 255;
+        }
+    }
+
+    let blit = |dst: &mut [u8],
+                dst_w: u32,
+                card: &absen_gui::platform::toast_render::RenderedToast,
+                ox: u32,
+                oy: u32| {
+        for sy in 0..card.height {
+            for sx in 0..card.width {
+                let sidx = ((sy * card.width + sx) as usize) * 4;
+                let sa = card.rgba[sidx + 3] as f32 / 255.0;
+                if sa <= 0.0 {
+                    continue;
+                }
+                let didx = (((oy + sy) * dst_w + (ox + sx)) as usize) * 4;
+                let inv = 1.0 - sa;
+                for c in 0..3 {
+                    let v = card.rgba[sidx + c] as f32 * sa + dst[didx + c] as f32 * inv;
+                    dst[didx + c] = v.round().clamp(0.0, 255.0) as u8;
+                }
+                dst[didx + 3] = 255;
+            }
+        }
+    };
+
+    // Align flush-right like actual Windows corner toasts!
+    let mut y = pad_y;
+    for card in &cards {
+        let ox = total_w - pad_x - card.width;
+        blit(&mut composite, total_w, card, ox, y);
+        y += card.height + gap_y;
+    }
+
+    let composite_toast = absen_gui::platform::toast_render::RenderedToast {
+        width: total_w,
+        height: total_h,
+        rgba: composite,
+        card_rect: [0, 0, total_w as i32, total_h as i32],
+        close_rect: [0, 0, 0, 0],
+    };
+    let png = absen_gui::platform::toast_render::encode_png(&composite_toast)
+        .expect("Minecraft toast composite PNG must encode cleanly");
+    assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+    assert!(total_w >= 360 && total_h >= 240);
+
+    if let Ok(out_path) = std::env::var("POLBAN_EXPORT_TOAST_PREVIEW") {
+        std::fs::write(&out_path, &png).expect("failed to write Minecraft toast preview PNG");
+    }
 }

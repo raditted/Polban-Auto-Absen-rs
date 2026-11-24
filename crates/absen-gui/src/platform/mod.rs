@@ -1,7 +1,13 @@
-//! OS integration modules (system tray, desktop notifications, launch at login).
+//! OS integration modules (system tray, desktop notifications, audio, launch at login).
 
 pub mod autostart;
 pub mod notify;
+pub mod sound;
+#[cfg(any(target_os = "macos", test))]
+pub mod toast_macos;
+pub mod toast_render;
+#[cfg(target_os = "windows")]
+pub mod toast_win32;
 pub mod tray;
 #[cfg(target_os = "windows")]
 pub mod win32;

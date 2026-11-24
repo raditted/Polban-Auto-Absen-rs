@@ -127,6 +127,10 @@ pub enum PrefsError {
     InvalidDotenv(String),
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// Non-secret user preferences stored in `prefs.json`.
 /// Passwords are never serialized here; they belong in `CredentialStore`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -146,6 +150,8 @@ pub struct AppPrefs {
     pub minimize_to_tray: bool,
     pub autostart: bool,
     pub notifications_enabled: bool,
+    #[serde(default = "default_true")]
+    pub notification_sound: bool,
     pub auto_start_monitoring: bool,
     pub state_file: Option<PathBuf>,
 }
@@ -167,6 +173,7 @@ impl Default for AppPrefs {
             minimize_to_tray: true,
             autostart: false,
             notifications_enabled: true,
+            notification_sound: true,
             auto_start_monitoring: false,
             state_file: None,
         }
@@ -399,6 +406,7 @@ mod tests {
             minimize_to_tray: false,
             autostart: true,
             notifications_enabled: false,
+            notification_sound: false,
             auto_start_monitoring: true,
             state_file: Some(dir.join("clicked.json")),
         };
@@ -420,6 +428,23 @@ mod tests {
         assert_eq!(load_from_path(&path).unwrap().interval, 90);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn notification_sound_defaults_true_and_roundtrips_false() {
+        let legacy_json = r#"{
+            "nim": "251511099",
+            "notifications_enabled": true
+        }"#;
+        let legacy_prefs: AppPrefs = serde_json::from_str(legacy_json).unwrap();
+        assert!(legacy_prefs.notification_sound);
+
+        let mut muted = AppPrefs::default();
+        assert!(muted.notification_sound);
+        muted.notification_sound = false;
+        let json = serde_json::to_string(&muted).unwrap();
+        let decoded: AppPrefs = serde_json::from_str(&json).unwrap();
+        assert!(!decoded.notification_sound);
     }
 
     #[test]

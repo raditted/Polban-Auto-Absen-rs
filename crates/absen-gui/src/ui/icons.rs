@@ -435,6 +435,56 @@ pub fn draw_shield_check(painter: &egui::Painter, rect: Rect, color: Color32) {
     painter.add(egui::Shape::line(vec![c0, c1, c2], stroke));
 }
 
+/// Draw a notification bell icon inside `rect`.
+pub fn draw_bell(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let r = rect.shrink(rect.width().min(rect.height()) * 0.16);
+    let stroke = Stroke::new(1.5_f32, color);
+    let cx = r.center().x;
+
+    // Top suspension ring/knob
+    painter.line_segment(
+        [
+            Pos2::new(cx, r.top()),
+            Pos2::new(cx, r.top() + r.height() * 0.10),
+        ],
+        stroke,
+    );
+
+    // Bell dome & flared brim
+    let dome_top = r.top() + r.height() * 0.12;
+    let dome_mid_y = r.top() + r.height() * 0.44;
+    let brim_y = r.bottom() - r.height() * 0.20;
+    let dome_rx = r.width() * 0.30;
+    let brim_rx = r.width() * 0.42;
+
+    let mut outline = Vec::with_capacity(15);
+    outline.push(Pos2::new(cx - brim_rx, brim_y));
+    outline.push(Pos2::new(cx - dome_rx, dome_mid_y));
+    for i in 0..=8 {
+        let t = i as f32 / 8.0;
+        let angle = std::f32::consts::PI * (1.0 - t);
+        outline.push(Pos2::new(
+            cx + dome_rx * angle.cos(),
+            dome_mid_y - (dome_mid_y - dome_top) * angle.sin(),
+        ));
+    }
+    outline.push(Pos2::new(cx + brim_rx, brim_y));
+    painter.add(egui::Shape::closed_line(outline, stroke));
+
+    // Bottom clapper arc
+    let clapper_pts: Vec<Pos2> = (0..=6)
+        .map(|i| {
+            let t = i as f32 / 6.0;
+            let angle = std::f32::consts::PI * t;
+            Pos2::new(
+                cx - r.width() * 0.14 * angle.cos(),
+                brim_y + r.height() * 0.16 * angle.sin(),
+            )
+        })
+        .collect();
+    painter.add(egui::Shape::line(clapper_pts, stroke));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
