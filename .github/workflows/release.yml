@@ -64,7 +64,7 @@ jobs:
             bin_path: target/aarch64-apple-darwin/release/polban-absen
             asset: polban-absen-aarch64-apple-darwin
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install system packages
         if: matrix.packages != ''
@@ -112,7 +112,7 @@ jobs:
           cp "${{ matrix.bin_path }}" "dist/${{ matrix.asset }}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.asset }}
           path: dist/${{ matrix.asset }}
@@ -145,7 +145,7 @@ jobs:
             packages: "libgtk-3-dev libayatana-appindicator3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libgl1-mesa-dev libdbus-1-dev rpm"
             asset: Polban-Presensi-Linux-x64.tar.gz
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Resolve APP_VERSION
         shell: bash
@@ -289,7 +289,7 @@ jobs:
           esac
 
       - name: Upload GUI artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gui-${{ matrix.target }}
           path: dist/*
@@ -300,7 +300,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
@@ -340,7 +340,7 @@ jobs:
           NOTES
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: artifacts/*
           body_path: release_notes.md
