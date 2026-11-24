@@ -14,4 +14,4 @@ pub mod win32;
 
 pub use autostart::AutostartManager;
 pub use notify::Notifier;
-pub use tray::{TrayCommand, TrayManager, TrayWaker};
+pub use tray::{supports_hide_to_tray, TrayCommand, TrayManager, TrayWaker};

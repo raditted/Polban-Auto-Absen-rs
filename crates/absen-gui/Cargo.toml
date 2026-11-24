@@ -16,7 +16,7 @@ eframe = { version = "0.29", default-features = false, features = ["glow", "defa
 egui = "0.29"
 image = { version = "0.25", default-features = false, features = ["png"] }
 ab_glyph = "0.2"
-tray-icon = "0.19"
+tray-icon = { version = "0.19", default-features = false }
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 auto-launch = "0.5"
 rfd = "0.15"

@@ -169,6 +169,13 @@ impl SettingsState {
     }
 }
 
+/// Host capability flags passed to [`show`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettingsHost {
+    pub backend: CredentialBackend,
+    pub hide_to_tray_supported: bool,
+}
+
 /// User action returned by the settings modal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsAction {
@@ -743,12 +750,14 @@ pub fn show_onboarding(
 pub fn show(
     ctx: &egui::Context,
     state: &mut SettingsState,
-    backend: CredentialBackend,
+    host: SettingsHost,
     palette: &Palette,
     update_status: &UpdateStatus,
     checking_update: bool,
     update_note: Option<&(String, bool)>,
 ) -> Option<SettingsAction> {
+    let backend = host.backend;
+    let hide_to_tray_supported = host.hide_to_tray_supported;
     if !state.open {
         return None;
     }
@@ -1048,6 +1057,27 @@ pub fn show(
                                                 &mut state.minimize_to_tray,
                                                 "Tetap berjalan di system tray saat jendela ditutup",
                                             );
+                                            if !hide_to_tray_supported {
+                                                egui::Frame::none()
+                                                    .inner_margin(egui::Margin {
+                                                        left: ThemeTokens::SPACE_MD,
+                                                        right: ThemeTokens::SPACE_MD,
+                                                        top: 0.0,
+                                                        bottom: ThemeTokens::SPACE_SM,
+                                                    })
+                                                    .show(ui, |ui| {
+                                                        ui.add(
+                                                            egui::Label::new(
+                                                                RichText::new(
+                                                                    "Pada sesi Wayland, menutup jendela tetap menghentikan aplikasi karena jendela tidak dapat disembunyikan ke tray.",
+                                                                )
+                                                                .size(11.5)
+                                                                .color(palette.text_secondary),
+                                                            )
+                                                            .wrap(),
+                                                        );
+                                                    });
+                                            }
                                             hairline_divider(ui, palette.border_subtle);
                                             switch_row(
                                                 ui,

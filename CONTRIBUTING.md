@@ -36,7 +36,7 @@ cargo build --release --bin polban-absen --bin polban-absen-gui
 Pada Linux, pastikan paket dev GUI terpasang sebelum menjalankan `cargo test --workspace` atau build `polban-absen-gui`:
 
 ```bash
-sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev libxdo-dev \
+sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev \
   libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
   libxkbcommon-dev libgl1-mesa-dev libdbus-1-dev
 ```

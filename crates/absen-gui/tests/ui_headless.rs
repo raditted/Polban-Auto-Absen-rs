@@ -1759,173 +1759,264 @@ fn settings_notification_sound_toggle_and_test_notification_button_render_withou
         ("medium_960", Vec2::new(960.0, 640.0)),
         ("desktop_1280", Vec2::new(1280.0, 800.0)),
     ];
+    let expected_banner = if cfg!(target_os = "windows") {
+        "Notifikasi uji ditampilkan di pojok kanan bawah."
+    } else if cfg!(target_os = "macos") {
+        "Notifikasi uji ditampilkan di pojok kanan atas."
+    } else {
+        "Notifikasi uji dikirim ke sistem."
+    };
 
-    for theme in [ThemePreference::Light, ThemePreference::Dark] {
-        for (vp_name, size) in viewports {
-            let ctx = egui::Context::default();
-            let mut app = DesktopApp::new_headless(
-                &ctx,
-                configured_prefs(theme),
-                Box::new(MemoryFallbackStore::new()),
-            );
-            let (recorded, log) = absen_gui::platform::Notifier::new_recorded(true);
-            app.set_notifier_for_test(recorded);
-            app.set_test_snapshot(Some(sample_populated_snapshot()));
+    for hide_to_tray_supported in [true, false] {
+        for theme in [ThemePreference::Light, ThemePreference::Dark] {
+            for (vp_name, size) in viewports {
+                let ctx = egui::Context::default();
+                let mut app = DesktopApp::new_headless(
+                    &ctx,
+                    configured_prefs(theme),
+                    Box::new(MemoryFallbackStore::new()),
+                );
+                app.set_hide_to_tray_supported_for_test(hide_to_tray_supported);
+                let (recorded, log) = absen_gui::platform::Notifier::new_recorded(true);
+                app.set_notifier_for_test(recorded);
+                app.set_test_snapshot(Some(sample_populated_snapshot()));
 
-            // Open Settings via Ctrl+,
-            let _ = run_frames(
+                // Open Settings via Ctrl+,
+                let _ = run_frames(
+                    &ctx,
+                    &mut app,
+                    size,
+                    vec![Event::Key {
+                        key: Key::Comma,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: Modifiers::COMMAND,
+                    }],
+                );
+                assert!(app.is_settings_open());
+
+                // 1. Scroll until "Tampilkan notifikasi sistem" & "Putar suara notifikasi" are comfortably clickable.
+                let center = Pos2::new(size.x * 0.5, size.y * 0.5);
+                let safe_click_bottom = size.y - 110.0;
+                let mut section_out = run_frames(&ctx, &mut app, size, Vec::new());
+                for _ in 0..14 {
+                    let rects = collect_text_rects(&section_out);
+                    if let (Some(_), Some(sound_r)) = (
+                        find_text_rect(&rects, "Tampilkan notifikasi sistem"),
+                        find_text_rect(&rects, "Putar suara notifikasi"),
+                    ) {
+                        if sound_r.bottom() <= safe_click_bottom {
+                            break;
+                        }
+                    }
+                    section_out = run_frames(
+                        &ctx,
+                        &mut app,
+                        size,
+                        vec![
+                            Event::PointerMoved(center),
+                            Event::MouseWheel {
+                                unit: egui::MouseWheelUnit::Point,
+                                delta: Vec2::new(0.0, -140.0),
+                                modifiers: Modifiers::NONE,
+                            },
+                        ],
+                    );
+                }
+
+                assert_no_horizontal_overflow(
+                    &section_out,
+                    size.x,
+                    &format!(
+                        "settings_notify_switches_{vp_name}_{theme:?}_{hide_to_tray_supported}"
+                    ),
+                );
+                let rects = collect_text_rects(&section_out);
+                let notif_rect = find_text_rect(&rects, "Tampilkan notifikasi sistem")
+                    .unwrap_or_else(|| panic!("{vp_name} ({theme:?}) missing notif toggle"));
+                let sound_rect = find_text_rect(&rects, "Putar suara notifikasi")
+                    .unwrap_or_else(|| panic!("{vp_name} ({theme:?}) missing sound toggle"));
+                assert!(
+                    !notif_rect.intersects(sound_rect),
+                    "{vp_name} ({theme:?}): notif and sound toggles overlapped"
+                );
+                assert!(
+                    sound_rect.top() > notif_rect.bottom(),
+                    "{vp_name} ({theme:?}): sound toggle should sit below notification toggle"
+                );
+
+                // Toggle sound off.
+                let mut after_toggle =
+                    run_frames(&ctx, &mut app, size, click_at(sound_rect.center()));
+
+                // 2. Scroll further if needed until "Uji Notifikasi" is comfortably clickable.
+                for _ in 0..8 {
+                    let r = collect_text_rects(&after_toggle);
+                    if let (Some(_), Some(btn_r)) = (
+                        find_text_rect(&r, "Mulai pemantauan otomatis saat aplikasi dibuka"),
+                        find_text_rect(&r, "Uji Notifikasi"),
+                    ) {
+                        if btn_r.bottom() <= safe_click_bottom {
+                            break;
+                        }
+                    }
+                    after_toggle = run_frames(
+                        &ctx,
+                        &mut app,
+                        size,
+                        vec![
+                            Event::PointerMoved(center),
+                            Event::MouseWheel {
+                                unit: egui::MouseWheelUnit::Point,
+                                delta: Vec2::new(0.0, -140.0),
+                                modifiers: Modifiers::NONE,
+                            },
+                        ],
+                    );
+                }
+
+                assert_no_horizontal_overflow(
+                    &after_toggle,
+                    size.x,
+                    &format!("settings_notify_btn_{vp_name}_{theme:?}_{hide_to_tray_supported}"),
+                );
+                let after_toggle_rects = collect_text_rects(&after_toggle);
+                let auto_mon_rect = find_text_rect(
+                    &after_toggle_rects,
+                    "Mulai pemantauan otomatis saat aplikasi dibuka",
+                )
+                .unwrap_or_else(|| panic!("{vp_name} ({theme:?}) missing auto-monitor toggle"));
+                let test_btn_rect = find_text_rect(&after_toggle_rects, "Uji Notifikasi")
+                    .unwrap_or_else(|| {
+                        panic!("{vp_name} ({theme:?}) missing Uji Notifikasi button")
+                    });
+                assert!(
+                    !auto_mon_rect.intersects(test_btn_rect),
+                    "{vp_name} ({theme:?}): Uji Notifikasi overlapped switches card"
+                );
+                assert!(
+                    test_btn_rect.top() > auto_mon_rect.bottom(),
+                    "{vp_name} ({theme:?}): Uji Notifikasi should sit below Integrasi Desktop switches"
+                );
+
+                // Click Uji Notifikasi and scroll to bottom status banner.
+                let mut after_test =
+                    run_frames(&ctx, &mut app, size, click_at(test_btn_rect.center()));
+                for _ in 0..10 {
+                    if collect_rendered_text(&after_test).contains(expected_banner) {
+                        break;
+                    }
+                    after_test = run_frames(
+                        &ctx,
+                        &mut app,
+                        size,
+                        vec![
+                            Event::PointerMoved(center),
+                            Event::MouseWheel {
+                                unit: egui::MouseWheelUnit::Point,
+                                delta: Vec2::new(0.0, -320.0),
+                                modifiers: Modifiers::NONE,
+                            },
+                        ],
+                    );
+                }
+                let after_test_text = collect_rendered_text(&after_test);
+                assert!(
+                    after_test_text.contains(expected_banner),
+                    "{vp_name} ({theme:?}): expected test notification status banner {expected_banner:?}"
+                );
+
+                let recorded_entries = log.lock().unwrap().clone();
+                assert_eq!(recorded_entries.len(), 1);
+                assert_eq!(recorded_entries[0].0, "Notifikasi Aktif!");
+                assert_eq!(recorded_entries[0].1, "Toast & suara siap digunakan.");
+
+                // Save Settings and confirm notification_sound persisted as false.
+                let save_rect =
+                    find_text_rect(&collect_text_rects(&after_test), "Simpan Pengaturan")
+                        .expect("expected Simpan Pengaturan button");
+                let _ = run_frames(&ctx, &mut app, size, click_at(save_rect.center()));
+                assert!(!app.is_settings_open());
+                assert!(!app.prefs().notification_sound);
+            }
+        }
+    }
+}
+
+#[test]
+fn settings_wayland_helper_note_renders_without_overflow_or_overlap() {
+    let viewports = [
+        ("narrow_680", Vec2::new(680.0, 540.0)),
+        ("medium_960", Vec2::new(960.0, 640.0)),
+        ("desktop_1280", Vec2::new(1280.0, 800.0)),
+    ];
+
+    for (vp_name, size) in viewports {
+        let ctx = egui::Context::default();
+        let mut app = DesktopApp::new_headless(
+            &ctx,
+            configured_prefs(ThemePreference::Light),
+            Box::new(MemoryFallbackStore::new()),
+        );
+        app.set_hide_to_tray_supported_for_test(false);
+        app.set_test_snapshot(Some(sample_populated_snapshot()));
+
+        let _ = run_frames(
+            &ctx,
+            &mut app,
+            size,
+            vec![Event::Key {
+                key: Key::Comma,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::COMMAND,
+            }],
+        );
+        assert!(app.is_settings_open());
+
+        let center = Pos2::new(size.x * 0.5, size.y * 0.5);
+        let safe_click_bottom = size.y - 110.0;
+        let mut out = run_frames(&ctx, &mut app, size, Vec::new());
+        for _ in 0..14 {
+            let rects = collect_text_rects(&out);
+            if let (Some(_), Some(notif_r)) = (
+                find_text_rect(&rects, "Pada sesi Wayland"),
+                find_text_rect(&rects, "Tampilkan notifikasi sistem"),
+            ) {
+                if notif_r.bottom() <= safe_click_bottom {
+                    break;
+                }
+            }
+            out = run_frames(
                 &ctx,
                 &mut app,
                 size,
-                vec![Event::Key {
-                    key: Key::Comma,
-                    physical_key: None,
-                    pressed: true,
-                    repeat: false,
-                    modifiers: Modifiers::COMMAND,
-                }],
+                vec![
+                    Event::PointerMoved(center),
+                    Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: Vec2::new(0.0, -120.0),
+                        modifiers: Modifiers::NONE,
+                    },
+                ],
             );
-            assert!(app.is_settings_open());
-
-            // 1. Scroll until "Tampilkan notifikasi sistem" & "Putar suara notifikasi" are comfortably clickable.
-            let center = Pos2::new(size.x * 0.5, size.y * 0.5);
-            let safe_click_bottom = size.y - 110.0;
-            let mut section_out = run_frames(&ctx, &mut app, size, Vec::new());
-            for _ in 0..14 {
-                let rects = collect_text_rects(&section_out);
-                if let (Some(_), Some(sound_r)) = (
-                    find_text_rect(&rects, "Tampilkan notifikasi sistem"),
-                    find_text_rect(&rects, "Putar suara notifikasi"),
-                ) {
-                    if sound_r.bottom() <= safe_click_bottom {
-                        break;
-                    }
-                }
-                section_out = run_frames(
-                    &ctx,
-                    &mut app,
-                    size,
-                    vec![
-                        Event::PointerMoved(center),
-                        Event::MouseWheel {
-                            unit: egui::MouseWheelUnit::Point,
-                            delta: Vec2::new(0.0, -140.0),
-                            modifiers: Modifiers::NONE,
-                        },
-                    ],
-                );
-            }
-
-            assert_no_horizontal_overflow(
-                &section_out,
-                size.x,
-                &format!("settings_notify_switches_{vp_name}_{theme:?}"),
-            );
-            let rects = collect_text_rects(&section_out);
-            let notif_rect = find_text_rect(&rects, "Tampilkan notifikasi sistem")
-                .unwrap_or_else(|| panic!("{vp_name} ({theme:?}) missing notif toggle"));
-            let sound_rect = find_text_rect(&rects, "Putar suara notifikasi")
-                .unwrap_or_else(|| panic!("{vp_name} ({theme:?}) missing sound toggle"));
-            assert!(
-                !notif_rect.intersects(sound_rect),
-                "{vp_name} ({theme:?}): notif and sound toggles overlapped"
-            );
-            assert!(
-                sound_rect.top() > notif_rect.bottom(),
-                "{vp_name} ({theme:?}): sound toggle should sit below notification toggle"
-            );
-
-            // Toggle sound off.
-            let mut after_toggle = run_frames(&ctx, &mut app, size, click_at(sound_rect.center()));
-
-            // 2. Scroll further if needed until "Uji Notifikasi" is comfortably clickable.
-            for _ in 0..8 {
-                let r = collect_text_rects(&after_toggle);
-                if let (Some(_), Some(btn_r)) = (
-                    find_text_rect(&r, "Mulai pemantauan otomatis saat aplikasi dibuka"),
-                    find_text_rect(&r, "Uji Notifikasi"),
-                ) {
-                    if btn_r.bottom() <= safe_click_bottom {
-                        break;
-                    }
-                }
-                after_toggle = run_frames(
-                    &ctx,
-                    &mut app,
-                    size,
-                    vec![
-                        Event::PointerMoved(center),
-                        Event::MouseWheel {
-                            unit: egui::MouseWheelUnit::Point,
-                            delta: Vec2::new(0.0, -140.0),
-                            modifiers: Modifiers::NONE,
-                        },
-                    ],
-                );
-            }
-
-            assert_no_horizontal_overflow(
-                &after_toggle,
-                size.x,
-                &format!("settings_notify_btn_{vp_name}_{theme:?}"),
-            );
-            let after_toggle_rects = collect_text_rects(&after_toggle);
-            let auto_mon_rect = find_text_rect(
-                &after_toggle_rects,
-                "Mulai pemantauan otomatis saat aplikasi dibuka",
-            )
-            .unwrap_or_else(|| panic!("{vp_name} ({theme:?}) missing auto-monitor toggle"));
-            let test_btn_rect = find_text_rect(&after_toggle_rects, "Uji Notifikasi")
-                .unwrap_or_else(|| panic!("{vp_name} ({theme:?}) missing Uji Notifikasi button"));
-            assert!(
-                !auto_mon_rect.intersects(test_btn_rect),
-                "{vp_name} ({theme:?}): Uji Notifikasi overlapped switches card"
-            );
-            assert!(
-                test_btn_rect.top() > auto_mon_rect.bottom(),
-                "{vp_name} ({theme:?}): Uji Notifikasi should sit below Integrasi Desktop switches"
-            );
-
-            // Click Uji Notifikasi and scroll to bottom status banner.
-            let mut after_test = run_frames(&ctx, &mut app, size, click_at(test_btn_rect.center()));
-            for _ in 0..10 {
-                if collect_rendered_text(&after_test)
-                    .contains("Notifikasi uji ditampilkan di pojok kanan bawah.")
-                {
-                    break;
-                }
-                after_test = run_frames(
-                    &ctx,
-                    &mut app,
-                    size,
-                    vec![
-                        Event::PointerMoved(center),
-                        Event::MouseWheel {
-                            unit: egui::MouseWheelUnit::Point,
-                            delta: Vec2::new(0.0, -320.0),
-                            modifiers: Modifiers::NONE,
-                        },
-                    ],
-                );
-            }
-            let after_test_text = collect_rendered_text(&after_test);
-            assert!(
-                after_test_text.contains("Notifikasi uji ditampilkan di pojok kanan bawah."),
-                "{vp_name} ({theme:?}): expected test notification status banner"
-            );
-
-            let recorded_entries = log.lock().unwrap().clone();
-            assert_eq!(recorded_entries.len(), 1);
-            assert_eq!(recorded_entries[0].0, "Notifikasi Aktif!");
-            assert_eq!(recorded_entries[0].1, "Toast & suara siap digunakan.");
-
-            // Save Settings and confirm notification_sound persisted as false.
-            let save_rect = find_text_rect(&collect_text_rects(&after_test), "Simpan Pengaturan")
-                .expect("expected Simpan Pengaturan button");
-            let _ = run_frames(&ctx, &mut app, size, click_at(save_rect.center()));
-            assert!(!app.is_settings_open());
-            assert!(!app.prefs().notification_sound);
         }
+
+        assert_no_horizontal_overflow(&out, size.x, &format!("wayland_note_{vp_name}"));
+        let rects = collect_text_rects(&out);
+        let tray_rect =
+            find_text_rect(&rects, "Tetap berjalan di system tray saat jendela ditutup")
+                .unwrap_or_else(|| panic!("{vp_name} missing tray switch"));
+        let wayland_rect = find_text_rect(&rects, "Pada sesi Wayland")
+            .unwrap_or_else(|| panic!("{vp_name} missing Wayland helper note"));
+        let notif_rect = find_text_rect(&rects, "Tampilkan notifikasi sistem")
+            .unwrap_or_else(|| panic!("{vp_name} missing notif switch"));
+        assert!(!tray_rect.intersects(wayland_rect));
+        assert!(!wayland_rect.intersects(notif_rect));
+        assert!(wayland_rect.top() >= tray_rect.bottom());
+        assert!(notif_rect.top() >= wayland_rect.bottom());
     }
 }
 

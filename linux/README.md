@@ -74,10 +74,23 @@ bash run.sh
 - Jika membangun `polban-absen-gui` dari source di Ubuntu/Debian, pasang paket dependensi sistem terlebih dahulu:
   ```bash
   sudo apt-get update && sudo apt-get install -y \
-    libgtk-3-dev libayatana-appindicator3-dev libxdo-dev \
+    libgtk-3-dev libayatana-appindicator3-dev \
     libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
     libxkbcommon-dev libgl1-mesa-dev libdbus-1-dev
   ```
+- **Arch Linux / EndeavourOS:** pasang dependensi runtime/build berikut agar GUI dan ikon system tray (StatusNotifierItem / Waybar) berjalan:
+  ```bash
+  sudo pacman -S --needed gtk3 libayatana-appindicator libxkbcommon libxcb mesa dbus
+  ```
+- **Wayland / Hyprland & System Tray:**
+  - Di sesi Linux Wayland native (seperti Hyprland, Sway, atau GNOME/KDE Wayland), `winit` tidak mendukung menyembunyikan jendela ke tray. Karena itu, menutup jendela (`X` atau keybind tutup jendela seperti `Super+C`) langsung menutup aplikasi agar jendela tidak macet di layar.
+  - Jika ingin memakai fitur sembunyikan ke system tray (*close-to-tray*) di Wayland, jalankan aplikasi lewat XWayland:
+    ```bash
+    WINIT_UNIX_BACKEND=x11 polban-absen-gui
+    # atau via launcher di folder linux/:
+    WINIT_UNIX_BACKEND=x11 bash run-gui.sh
+    ```
+  - Gunakan `Ctrl+Q` kapan saja untuk keluar penuh dari aplikasi (termasuk saat mode *close-to-tray* aktif di X11/XWayland).
 - Kredensial di GUI disimpan lewat Secret Service OS (GNOME Keyring/KWallet) jika tersedia, atau memori sesi sebagai fallback.
 - Jalankan `bash install.sh --desktop` untuk menambahkan **Polban Presensi** ke menu aplikasi (`~/.local/share/applications/polban-presensi.desktop`).
 

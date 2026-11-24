@@ -188,11 +188,6 @@ fn main() -> eframe::Result<()> {
 
     absen_gui::updater::cleanup_old_executables();
 
-    #[cfg(target_os = "linux")]
-    if let Err(err) = gtk::init() {
-        eprintln!("Peringatan: gagal menginisialisasi GTK untuk tray: {err}");
-    }
-
     let instance_guard = match acquire_single_instance_at(SINGLE_INSTANCE_ADDR) {
         SingleInstanceOutcome::Primary(handle) => Some(Arc::new(Mutex::new(Some(handle)))),
         SingleInstanceOutcome::SecondaryNotified => return Ok(()),

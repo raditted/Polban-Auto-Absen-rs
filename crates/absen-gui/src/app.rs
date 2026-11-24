@@ -166,6 +166,7 @@ struct AppCore {
     quit_requested: bool,
     headless: bool,
     headless_tray_active: bool,
+    hide_to_tray_supported: bool,
     test_snapshot: Option<GuiSnapshot>,
     diag_rx: Option<mpsc::Receiver<Result<PathBuf, String>>>,
     import_pick_rx: Option<mpsc::Receiver<Option<Result<DotenvImportResult, PrefsError>>>>,
@@ -1100,7 +1101,7 @@ impl AppCore {
     fn update_ui(&mut self, ctx: &egui::Context) {
         if self.start_minimized && !self.minimized_applied {
             self.minimized_applied = true;
-            if self.tray.is_some() {
+            if self.hide_to_tray_supported && (self.tray.is_some() || self.headless_tray_active) {
                 self.controller.set_window_visible(false);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             } else {
@@ -1123,6 +1124,7 @@ impl AppCore {
         if ctx.input(|i| i.viewport().close_requested())
             && !self.quit_requested
             && self.prefs.minimize_to_tray
+            && self.hide_to_tray_supported
             && (self.tray.is_some() || self.headless_tray_active)
         {
             self.controller.set_window_visible(false);
@@ -1472,11 +1474,14 @@ impl AppCore {
             }
         }
 
-        let backend = self.creds.backend();
+        let host = settings::SettingsHost {
+            backend: self.creds.backend(),
+            hide_to_tray_supported: self.hide_to_tray_supported,
+        };
         if let Some(action) = settings::show(
             ctx,
             &mut self.settings,
-            backend,
+            host,
             palette,
             &self.updater.status,
             self.updater.checking_manual,
@@ -1558,6 +1563,7 @@ impl DesktopApp {
         notifier.set_sound_enabled(prefs.notification_sound);
         notifier.set_palette(*initial_palette);
         let tray = TrayManager::new().ok();
+        let hide_to_tray_supported = crate::platform::supports_hide_to_tray();
 
         let mut controller = EngineController::new();
         controller.set_notifier(notifier.clone());
@@ -1576,7 +1582,7 @@ impl DesktopApp {
         } else {
             format!("Bukti ({initial_proof_count})")
         };
-        if start_minimized && tray.is_some() {
+        if start_minimized && tray.is_some() && hide_to_tray_supported {
             controller.set_window_visible(false);
         }
 
@@ -1619,6 +1625,7 @@ impl DesktopApp {
             quit_requested: false,
             headless: false,
             headless_tray_active: false,
+            hide_to_tray_supported,
             test_snapshot: None,
             diag_rx: None,
             import_pick_rx: None,
@@ -1790,6 +1797,7 @@ impl DesktopApp {
             quit_requested: false,
             headless: true,
             headless_tray_active: false,
+            hide_to_tray_supported: true,
             test_snapshot: None,
             diag_rx: None,
             import_pick_rx: None,
@@ -1838,6 +1846,11 @@ impl DesktopApp {
     /// Enable simulated tray availability for headless close-to-tray tests.
     pub fn set_headless_tray_active_for_test(&mut self, active: bool) {
         self.core.borrow_mut().headless_tray_active = active;
+    }
+
+    /// Override whether hiding the window to the tray is supported (e.g. simulate Wayland).
+    pub fn set_hide_to_tray_supported_for_test(&mut self, supported: bool) {
+        self.core.borrow_mut().hide_to_tray_supported = supported;
     }
 
     /// Override the `Notifier` (for example with `Notifier::new_recorded`) in tests.
@@ -2136,5 +2149,136 @@ mod tests {
 
         let _ = ctx3.run(make_close_input(), |c| app3.update_ui(c));
         assert!(log3.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn close_to_tray_falls_back_to_normal_close_when_hide_unsupported() {
+        let make_close_input = || {
+            let mut raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 640.0),
+                )),
+                ..Default::default()
+            };
+            raw.viewports.insert(
+                egui::ViewportId::ROOT,
+                egui::ViewportInfo {
+                    events: vec![egui::ViewportEvent::Close],
+                    ..Default::default()
+                },
+            );
+            raw
+        };
+
+        // Supported (e.g. Windows/macOS/X11): cancels close and hides window.
+        let ctx_ok = egui::Context::default();
+        let mut app_ok = DesktopApp::new_headless(
+            &ctx_ok,
+            AppPrefs {
+                minimize_to_tray: true,
+                notifications_enabled: true,
+                ..AppPrefs::default()
+            },
+            Box::new(MemoryFallbackStore::new()),
+        );
+        let (notifier_ok, log_ok) = Notifier::new_recorded(true);
+        app_ok.set_notifier_for_test(notifier_ok);
+        app_ok.set_headless_tray_active_for_test(true);
+        app_ok.set_hide_to_tray_supported_for_test(true);
+
+        let out_ok = ctx_ok.run(make_close_input(), |c| app_ok.update_ui(c));
+        let cmds_ok = &out_ok.viewport_output[&egui::ViewportId::ROOT].commands;
+        assert!(cmds_ok
+            .iter()
+            .any(|c| matches!(c, egui::ViewportCommand::CancelClose)));
+        assert!(cmds_ok
+            .iter()
+            .any(|c| matches!(c, egui::ViewportCommand::Visible(false))));
+        assert!(!app_ok.core.borrow().controller.is_window_visible());
+        assert_eq!(log_ok.lock().unwrap().len(), 1);
+
+        // Unsupported (e.g. Linux native Wayland): allows normal close without CancelClose/Visible(false).
+        let ctx_wayland = egui::Context::default();
+        let mut app_wayland = DesktopApp::new_headless(
+            &ctx_wayland,
+            AppPrefs {
+                minimize_to_tray: true,
+                notifications_enabled: true,
+                ..AppPrefs::default()
+            },
+            Box::new(MemoryFallbackStore::new()),
+        );
+        let (notifier_wayland, log_wayland) = Notifier::new_recorded(true);
+        app_wayland.set_notifier_for_test(notifier_wayland);
+        app_wayland.set_headless_tray_active_for_test(true);
+        app_wayland.set_hide_to_tray_supported_for_test(false);
+
+        let out_wayland = ctx_wayland.run(make_close_input(), |c| app_wayland.update_ui(c));
+        let cmds_wayland = &out_wayland.viewport_output[&egui::ViewportId::ROOT].commands;
+        assert!(!cmds_wayland
+            .iter()
+            .any(|c| matches!(c, egui::ViewportCommand::CancelClose)));
+        assert!(!cmds_wayland
+            .iter()
+            .any(|c| matches!(c, egui::ViewportCommand::Visible(false))));
+        assert!(app_wayland.core.borrow().controller.is_window_visible());
+        assert!(log_wayland.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn start_minimized_falls_back_to_minimized_when_hide_unsupported() {
+        let make_input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(960.0, 640.0),
+            )),
+            ..Default::default()
+        };
+
+        // Supported: hides to tray with Visible(false).
+        let ctx_ok = egui::Context::default();
+        let mut app_ok = DesktopApp::new_headless(
+            &ctx_ok,
+            AppPrefs::default(),
+            Box::new(MemoryFallbackStore::new()),
+        );
+        app_ok.set_headless_tray_active_for_test(true);
+        app_ok.set_hide_to_tray_supported_for_test(true);
+        {
+            let mut core = app_ok.core.borrow_mut();
+            core.start_minimized = true;
+            core.minimized_applied = false;
+        }
+        let out_ok = ctx_ok.run(make_input(), |c| app_ok.update_ui(c));
+        let cmds_ok = &out_ok.viewport_output[&egui::ViewportId::ROOT].commands;
+        assert!(cmds_ok
+            .iter()
+            .any(|c| matches!(c, egui::ViewportCommand::Visible(false))));
+        assert!(!app_ok.core.borrow().controller.is_window_visible());
+
+        // Unsupported (Wayland): falls back to Minimized(true) instead of Visible(false).
+        let ctx_wayland = egui::Context::default();
+        let mut app_wayland = DesktopApp::new_headless(
+            &ctx_wayland,
+            AppPrefs::default(),
+            Box::new(MemoryFallbackStore::new()),
+        );
+        app_wayland.set_headless_tray_active_for_test(true);
+        app_wayland.set_hide_to_tray_supported_for_test(false);
+        {
+            let mut core = app_wayland.core.borrow_mut();
+            core.start_minimized = true;
+            core.minimized_applied = false;
+        }
+        let out_wayland = ctx_wayland.run(make_input(), |c| app_wayland.update_ui(c));
+        let cmds_wayland = &out_wayland.viewport_output[&egui::ViewportId::ROOT].commands;
+        assert!(cmds_wayland
+            .iter()
+            .any(|c| matches!(c, egui::ViewportCommand::Minimized(true))));
+        assert!(!cmds_wayland
+            .iter()
+            .any(|c| matches!(c, egui::ViewportCommand::Visible(false))));
+        assert!(app_wayland.core.borrow().controller.is_window_visible());
     }
 }

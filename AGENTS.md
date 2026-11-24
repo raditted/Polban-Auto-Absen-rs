@@ -44,7 +44,7 @@ node --check extension/*.js
 
 Cross-OS notes:
 - CI runs `clippy -D warnings` on **Windows, Linux, and macOS**. Always guard Windows-only code/imports with `#[cfg(target_os = "windows")]` (or `#[cfg(not(target_os = "windows"))]`) so Linux/macOS builds do not fail on `dead_code` or `unused` warnings.
-- On Linux, building/testing `absen-gui` requires: `libgtk-3-dev libayatana-appindicator3-dev libxdo-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libgl1-mesa-dev libdbus-1-dev`.
+- On Linux, building/testing `absen-gui` requires: `libgtk-3-dev libayatana-appindicator3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libgl1-mesa-dev libdbus-1-dev`.
 
 ## 3. Build Output, Runtime Paths & Source-of-Truth Rules
 
@@ -77,6 +77,11 @@ Cross-OS notes:
 - When an `eframe`/`winit` window is hidden (`SW_HIDE` / `Visible(false)`), Windows stops delivering `WM_PAINT`, so `eframe::App::update()` **does not run**. Do not rely on polling tray events inside `update()`.
 - Register `MenuEvent` and `TrayIconEvent` handlers **before** calling `TrayIconBuilder::build()`. Dispatch tray actions on the UI thread via the hidden `HWND_MESSAGE` window (`MessageWindow` + `WM_APP_*`).
 - Closing the window (`X`) while `minimize_to_tray == true` hides the window to the tray and sends a non-blocking `Notifier::notify_minimized_to_tray()` notification. Exiting via the tray menu must shut down cleanly without deadlocking.
+
+### Linux System Tray & Wayland (`platform/tray.rs`, `app.rs`)
+- `tray-icon` uses `default-features = false` (no `libxdo` / `xdotool` dependency).
+- On Linux (`#[cfg(target_os = "linux")]`), `LinuxTrayBackend` initializes GTK (`gtk::init()`), builds `TrayIcon` + `Menu`, and runs `gtk::main()` on a dedicated `"polban-gtk-tray"` thread, routing status updates and clean shutdown (`gtk::main_quit()`) via `gtk::glib::idle_add_once`. Do not call `gtk::init()` on the main `eframe`/`winit` thread.
+- `supports_hide_to_tray()` returns `false` on Linux native Wayland (`WAYLAND_DISPLAY` non-empty and `WINIT_UNIX_BACKEND != "x11"`), allowing normal window close instead of a stuck window from winit's no-op `Visible(false)`.
 
 ### Custom Desktop Notifications & Embedded Audio (`platform/notify.rs`, `platform/toast_render.rs`, `platform/toast_win32.rs`, `platform/toast_macos.rs`, `platform/sound.rs`)
 - On Windows (`toast_win32.rs`) and macOS (`toast_macos.rs`), desktop notifications use custom non-activating corner popups backed by `toast_render.rs` and embedded MP3 audio (`sound.rs` via `symphonia`). `notify-rust` is gated strictly to `#[cfg(not(any(target_os = "windows", target_os = "macos")))]` (Linux/BSD D-Bus) so Windows never displays a `"Windows PowerShell"` toast header and macOS renders the same pixel-art toast overlay.
