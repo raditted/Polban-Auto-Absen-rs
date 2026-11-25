@@ -268,7 +268,7 @@ jobs:
           Terminal=false
           Categories=Education;Utility;
           StartupNotify=true
-          StartupWMClass=polban-absen-gui
+          StartupWMClass=polban-presensi
           DESKTOP
               tar -czf "dist/${{ matrix.asset }}" -C "${STAGE_DIR}" polban-absen-gui polban-presensi.desktop polban-presensi.png
 

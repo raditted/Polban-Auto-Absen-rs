@@ -12,7 +12,10 @@ use crate::credentials::{open_default_store, CredentialStore};
 use crate::icon::IconStatus;
 #[cfg(target_os = "windows")]
 use crate::platform::win32;
-use crate::platform::{AutostartManager, Notifier, TrayCommand, TrayManager};
+use crate::platform::{
+    detect_window_backend, needs_window_controls, AutostartManager, Notifier, TrayCommand,
+    TrayManager, WindowBackend,
+};
 use crate::prefs::{self, AppPrefs, DotenvImportResult, PrefsError, ThemePreference};
 use crate::screenshot::{
     default_screenshot_filename, render_sample_attendance_png, write_png_atomic, ScreenshotSource,
@@ -25,6 +28,7 @@ use crate::ui::header::HeaderAction;
 use crate::ui::jadwal::JadwalAction;
 use crate::ui::proof::{ProofAction, ProofScreenshotView};
 use crate::ui::settings::{OnboardingAction, SettingsAction, SettingsState};
+use crate::ui::titlebar::{self, TitlebarAction};
 use crate::ui::{activity, header, jadwal, proof, settings, CompactTab};
 use crate::updater::{is_safe_http_url, open_url_in_browser, UpdateManager, UpdateStatus};
 
@@ -167,6 +171,8 @@ struct AppCore {
     headless: bool,
     headless_tray_active: bool,
     hide_to_tray_supported: bool,
+    show_window_controls: bool,
+    window_backend: WindowBackend,
     test_snapshot: Option<GuiSnapshot>,
     diag_rx: Option<mpsc::Receiver<Result<PathBuf, String>>>,
     import_pick_rx: Option<mpsc::Receiver<Option<Result<DotenvImportResult, PrefsError>>>>,
@@ -233,13 +239,77 @@ impl AppCore {
         }
     }
 
+    fn effective_hide_to_tray_supported(&self) -> bool {
+        if self.headless {
+            return self.hide_to_tray_supported;
+        }
+        self.tray
+            .as_ref()
+            .is_some_and(|t| t.supports_hide_to_tray(self.window_backend))
+    }
+
+    fn can_hide_to_tray(&self) -> bool {
+        if self.headless {
+            self.hide_to_tray_supported && self.headless_tray_active
+        } else {
+            self.effective_hide_to_tray_supported()
+        }
+    }
+
+    fn handle_window_close(&mut self, ctx: &egui::Context, from_viewport_close: bool) {
+        if !self.quit_requested && self.prefs.minimize_to_tray {
+            self.refresh_tray_host_status();
+            if self.can_hide_to_tray() {
+                self.controller.set_window_visible(false);
+                if from_viewport_close {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                }
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                self.notifier.notify_minimized_to_tray();
+                return;
+            }
+        }
+        if !from_viewport_close {
+            self.perform_quit(ctx);
+        }
+    }
+
+    fn handle_titlebar_action(&mut self, ctx: &egui::Context, action: TitlebarAction) {
+        match action {
+            TitlebarAction::StartDrag => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
+            TitlebarAction::Minimize => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            }
+            TitlebarAction::ToggleMaximize => {
+                let is_maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_maximized));
+            }
+            TitlebarAction::Close => {
+                self.handle_window_close(ctx, false);
+            }
+        }
+    }
+
+    fn refresh_tray_host_status(&self) {
+        if !self.headless {
+            if let Some(tray) = &self.tray {
+                tray.refresh_host_status(self.window_backend);
+            }
+        }
+    }
+
     fn open_settings(&mut self) {
+        self.refresh_tray_host_status();
         self.close_proof_modal();
         self.settings.theme = self.prefs.theme;
         self.settings.light_preset = self.prefs.light_preset;
         self.settings.dark_preset = self.prefs.dark_preset;
+        self.settings.ui_zoom_pct = prefs::clamp_ui_zoom_pct(self.prefs.ui_zoom_pct);
         self.settings.notifications_enabled = self.prefs.notifications_enabled;
         self.settings.notification_sound = self.prefs.notification_sound;
+        self.settings.notification_volume = self.prefs.normalized_notification_volume();
         self.settings.open = true;
     }
 
@@ -297,10 +367,17 @@ impl AppCore {
         self.settings.theme = self.prefs.theme;
         self.settings.light_preset = self.prefs.light_preset;
         self.settings.dark_preset = self.prefs.dark_preset;
+        self.settings.ui_zoom_pct = prefs::clamp_ui_zoom_pct(self.prefs.ui_zoom_pct);
         self.settings.notifications_enabled = self.prefs.notifications_enabled;
         self.settings.notification_sound = self.prefs.notification_sound;
+        self.settings.notification_volume = self.prefs.normalized_notification_volume();
+        ctx.set_zoom_factor(self.prefs.normalized_ui_zoom());
         let palette = apply_appearance(ctx, self.prefs_appearance());
         self.notifier.set_palette(*palette);
+        self.notifier
+            .set_sound_enabled(self.prefs.notification_sound);
+        self.notifier
+            .set_sound_volume(self.prefs.normalized_notification_volume());
         self.controller.set_notifier(self.notifier.clone());
     }
 
@@ -324,14 +401,17 @@ impl AppCore {
             .map(|t| t == egui::Theme::Dark)
             .unwrap_or(false);
         let palette = *ThemeTokens::resolve_appearance(self.settings.appearance(), system_dark);
+        let volume = prefs::clamp_notification_volume(self.settings.notification_volume);
         if self.notifier.is_recorded() {
             self.notifier.set_palette(palette);
             self.notifier
                 .set_sound_enabled(self.settings.notification_sound);
+            self.notifier.set_sound_volume(volume);
             self.notifier.notify_test();
         } else if !self.headless {
             let mut live = Notifier::new(true);
             live.set_sound_enabled(self.settings.notification_sound);
+            live.set_sound_volume(volume);
             live.set_palette(palette);
             #[cfg(target_os = "windows")]
             live.set_wake_hwnd(self.win32_msg_hwnd);
@@ -459,6 +539,38 @@ impl AppCore {
         }
     }
 
+    fn consume_zoom_key(input: &mut egui::InputState, key: egui::Key) -> bool {
+        let matches_non_alt = input.events.iter().any(|ev| {
+            matches!(
+                ev,
+                egui::Event::Key {
+                    key: ev_key,
+                    modifiers,
+                    pressed: true,
+                    ..
+                } if *ev_key == key
+                    && modifiers.matches_logically(egui::Modifiers::COMMAND)
+                    && !modifiers.alt
+            )
+        });
+        if matches_non_alt {
+            input.consume_key(egui::Modifiers::COMMAND, key)
+        } else {
+            false
+        }
+    }
+
+    fn apply_keyboard_zoom(&mut self, ctx: &egui::Context, next_zoom: u16) {
+        let clamped = prefs::clamp_ui_zoom_pct(next_zoom);
+        let changed = self.prefs.ui_zoom_pct != clamped || self.settings.ui_zoom_pct != clamped;
+        self.prefs.ui_zoom_pct = clamped;
+        self.settings.ui_zoom_pct = clamped;
+        ctx.set_zoom_factor(prefs::zoom_pct_to_factor(clamped));
+        if changed {
+            self.persist_prefs();
+        }
+    }
+
     fn handle_shortcuts(&mut self, ctx: &egui::Context, snapshot_active: bool) {
         if self.proof_modal_open
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
@@ -472,6 +584,23 @@ impl AppCore {
 
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma)) {
             self.open_settings();
+        }
+
+        const KEYBOARD_ZOOM_STEP: u16 = 10;
+        let base_zoom = if self.settings.open {
+            self.settings.ui_zoom_pct
+        } else {
+            self.prefs.ui_zoom_pct
+        };
+        if ctx.input_mut(|i| Self::consume_zoom_key(i, egui::Key::Num0)) {
+            self.apply_keyboard_zoom(ctx, prefs::DEFAULT_UI_ZOOM_PCT);
+        } else if ctx.input_mut(|i| {
+            Self::consume_zoom_key(i, egui::Key::Plus)
+                || Self::consume_zoom_key(i, egui::Key::Equals)
+        }) {
+            self.apply_keyboard_zoom(ctx, base_zoom.saturating_add(KEYBOARD_ZOOM_STEP));
+        } else if ctx.input_mut(|i| Self::consume_zoom_key(i, egui::Key::Minus)) {
+            self.apply_keyboard_zoom(ctx, base_zoom.saturating_sub(KEYBOARD_ZOOM_STEP));
         }
 
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::R)) {
@@ -510,6 +639,10 @@ impl AppCore {
         let open = self.settings.open;
         let mut next = SettingsState::from_prefs(&merged_prefs, pw.clone());
         next.open = open;
+        if open {
+            next.ui_zoom_pct = self.settings.ui_zoom_pct;
+            next.notification_volume = self.settings.notification_volume;
+        }
 
         let mut cred_saved = false;
         if !nim.is_empty() && !pw.is_empty() {
@@ -1076,9 +1209,12 @@ impl AppCore {
             }
         }
         let palette = apply_appearance(ctx, self.prefs_appearance());
+        ctx.set_zoom_factor(self.prefs.normalized_ui_zoom());
         self.notifier.set_enabled(self.prefs.notifications_enabled);
         self.notifier
             .set_sound_enabled(self.prefs.notification_sound);
+        self.notifier
+            .set_sound_volume(self.prefs.normalized_notification_volume());
         self.notifier.set_palette(*palette);
         #[cfg(target_os = "windows")]
         self.notifier.set_wake_hwnd(self.win32_msg_hwnd);
@@ -1101,7 +1237,7 @@ impl AppCore {
     fn update_ui(&mut self, ctx: &egui::Context) {
         if self.start_minimized && !self.minimized_applied {
             self.minimized_applied = true;
-            if self.hide_to_tray_supported && (self.tray.is_some() || self.headless_tray_active) {
+            if self.can_hide_to_tray() {
                 self.controller.set_window_visible(false);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             } else {
@@ -1121,16 +1257,8 @@ impl AppCore {
         }
         self.poll_background_tasks(ctx);
 
-        if ctx.input(|i| i.viewport().close_requested())
-            && !self.quit_requested
-            && self.prefs.minimize_to_tray
-            && self.hide_to_tray_supported
-            && (self.tray.is_some() || self.headless_tray_active)
-        {
-            self.controller.set_window_visible(false);
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            self.notifier.notify_minimized_to_tray();
+        if ctx.input(|i| i.viewport().close_requested()) {
+            self.handle_window_close(ctx, true);
         }
 
         let palette = apply_appearance(ctx, self.active_appearance());
@@ -1151,6 +1279,20 @@ impl AppCore {
         }
 
         self.sync_tray_status();
+
+        if self.show_window_controls {
+            let is_maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+            let minimize_to_tray_active =
+                !self.quit_requested && self.prefs.minimize_to_tray && self.can_hide_to_tray();
+            if let Some(action) =
+                titlebar::show(ctx, palette, is_maximized, minimize_to_tray_active)
+            {
+                self.handle_titlebar_action(ctx, action);
+                if self.quit_requested {
+                    return;
+                }
+            }
+        }
 
         let screen_w = ctx.screen_rect().width();
         let outer_margin = if screen_w < ThemeTokens::BREAKPOINT_MEDIUM {
@@ -1476,7 +1618,7 @@ impl AppCore {
 
         let host = settings::SettingsHost {
             backend: self.creds.backend(),
-            hide_to_tray_supported: self.hide_to_tray_supported,
+            hide_to_tray_supported: self.effective_hide_to_tray_supported(),
         };
         if let Some(action) = settings::show(
             ctx,
@@ -1502,6 +1644,9 @@ impl AppCore {
                     let palette = apply_appearance(ctx, appearance);
                     self.notifier.set_palette(*palette);
                     self.controller.set_notifier(self.notifier.clone());
+                }
+                SettingsAction::PreviewZoom(zoom_pct) => {
+                    ctx.set_zoom_factor(prefs::zoom_pct_to_factor(zoom_pct));
                 }
                 SettingsAction::TestNotification => {
                     self.handle_test_notification(ctx);
@@ -1531,8 +1676,10 @@ impl DesktopApp {
     /// Production desktop constructor loading OS preferences, keyring, and tray icon.
     pub fn new(cc: &eframe::CreationContext<'_>, start_minimized: bool) -> Self {
         configure_fonts(&cc.egui_ctx);
+        cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
 
         let mut prefs = prefs::load().unwrap_or_default();
+        cc.egui_ctx.set_zoom_factor(prefs.normalized_ui_zoom());
         let initial_palette = apply_appearance(
             &cc.egui_ctx,
             AppearanceConfig {
@@ -1561,9 +1708,13 @@ impl DesktopApp {
         let settings = SettingsState::from_prefs(&prefs, initial_password);
         let mut notifier = Notifier::new(prefs.notifications_enabled);
         notifier.set_sound_enabled(prefs.notification_sound);
+        notifier.set_sound_volume(prefs.normalized_notification_volume());
         notifier.set_palette(*initial_palette);
-        let tray = TrayManager::new().ok();
-        let hide_to_tray_supported = crate::platform::supports_hide_to_tray();
+        let window_backend = detect_window_backend(cc);
+        let tray = TrayManager::new_for_backend(window_backend).ok();
+        let hide_to_tray_supported = tray
+            .as_ref()
+            .is_some_and(|t| t.supports_hide_to_tray(window_backend));
 
         let mut controller = EngineController::new();
         controller.set_notifier(notifier.clone());
@@ -1582,7 +1733,7 @@ impl DesktopApp {
         } else {
             format!("Bukti ({initial_proof_count})")
         };
-        if start_minimized && tray.is_some() && hide_to_tray_supported {
+        if start_minimized && hide_to_tray_supported {
             controller.set_window_visible(false);
         }
 
@@ -1626,6 +1777,8 @@ impl DesktopApp {
             headless: false,
             headless_tray_active: false,
             hide_to_tray_supported,
+            show_window_controls: needs_window_controls(),
+            window_backend,
             test_snapshot: None,
             diag_rx: None,
             import_pick_rx: None,
@@ -1691,6 +1844,7 @@ impl DesktopApp {
             }
 
             let waker_ctx = cc.egui_ctx.clone();
+            let host_wake_ctx = cc.egui_ctx.clone();
             if let Some(t) = &mut c.tray {
                 t.set_waker(Arc::new(move |cmd| {
                     #[cfg(target_os = "windows")]
@@ -1705,6 +1859,9 @@ impl DesktopApp {
                     }
                     let _ = cmd;
                     waker_ctx.request_repaint();
+                }));
+                t.set_host_change_waker(Arc::new(move || {
+                    host_wake_ctx.request_repaint();
                 }));
             }
 
@@ -1731,6 +1888,8 @@ impl DesktopApp {
         creds: Box<dyn CredentialStore>,
     ) -> Self {
         configure_fonts(ctx);
+        ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        ctx.set_zoom_factor(prefs.normalized_ui_zoom());
         let initial_palette = apply_appearance(
             ctx,
             AppearanceConfig {
@@ -1753,6 +1912,7 @@ impl DesktopApp {
         let settings = SettingsState::from_prefs(&prefs, initial_password);
         let mut notifier = Notifier::new(prefs.notifications_enabled);
         notifier.set_sound_enabled(prefs.notification_sound);
+        notifier.set_sound_volume(prefs.normalized_notification_volume());
         notifier.set_palette(*initial_palette);
         let autostart = AutostartManager::new("Polban Presensi");
         let mut controller = EngineController::new();
@@ -1798,6 +1958,8 @@ impl DesktopApp {
             headless: true,
             headless_tray_active: false,
             hide_to_tray_supported: true,
+            show_window_controls: false,
+            window_backend: WindowBackend::Other,
             test_snapshot: None,
             diag_rx: None,
             import_pick_rx: None,
@@ -1853,11 +2015,36 @@ impl DesktopApp {
         self.core.borrow_mut().hide_to_tray_supported = supported;
     }
 
+    /// Enable or disable the in-app Linux window control bar in headless tests.
+    pub fn set_show_window_controls_for_test(&mut self, show: bool) {
+        self.core.borrow_mut().show_window_controls = show;
+    }
+
+    /// Returns whether the in-app Linux window control bar is active.
+    pub fn show_window_controls(&self) -> bool {
+        self.core.borrow().show_window_controls
+    }
+
     /// Override the `Notifier` (for example with `Notifier::new_recorded`) in tests.
     pub fn set_notifier_for_test(&mut self, notifier: Notifier) {
         let mut core = self.core.borrow_mut();
         core.notifier = notifier.clone();
         core.controller.set_notifier(notifier);
+    }
+
+    /// Read the active notifier sound volume (`0..=100`) in tests.
+    pub fn notifier_sound_volume_for_test(&self) -> u8 {
+        self.core.borrow().notifier.sound_volume()
+    }
+
+    /// Read the active Settings form UI zoom percentage (`70..=150`) in tests.
+    pub fn settings_ui_zoom_pct_for_test(&self) -> u16 {
+        self.core.borrow().settings.ui_zoom_pct
+    }
+
+    /// Read the active Settings form notification volume (`0..=100`) in tests.
+    pub fn settings_notification_volume_for_test(&self) -> u8 {
+        self.core.borrow().settings.notification_volume
     }
 
     /// Inject or clear a deterministic `GuiSnapshot` for headless UI testing.
@@ -2280,5 +2467,389 @@ mod tests {
             .iter()
             .any(|c| matches!(c, egui::ViewportCommand::Visible(false))));
         assert!(app_wayland.core.borrow().controller.is_window_visible());
+    }
+
+    #[test]
+    fn close_and_start_minimized_fall_back_when_tray_unavailable() {
+        let make_close_input = || {
+            let mut raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 640.0),
+                )),
+                ..Default::default()
+            };
+            raw.viewports.insert(
+                egui::ViewportId::ROOT,
+                egui::ViewportInfo {
+                    events: vec![egui::ViewportEvent::Close],
+                    ..Default::default()
+                },
+            );
+            raw
+        };
+
+        let ctx = egui::Context::default();
+        let mut app = DesktopApp::new_headless(
+            &ctx,
+            AppPrefs {
+                minimize_to_tray: true,
+                notifications_enabled: true,
+                ..AppPrefs::default()
+            },
+            Box::new(MemoryFallbackStore::new()),
+        );
+        let (notifier, log) = Notifier::new_recorded(true);
+        app.set_notifier_for_test(notifier);
+        app.set_headless_tray_active_for_test(false);
+        app.set_hide_to_tray_supported_for_test(true);
+        {
+            let mut core = app.core.borrow_mut();
+            core.start_minimized = true;
+            core.minimized_applied = false;
+        }
+
+        let out = ctx.run(make_close_input(), |c| app.update_ui(c));
+        let cmds = &out.viewport_output[&egui::ViewportId::ROOT].commands;
+        assert!(cmds
+            .iter()
+            .any(|c| matches!(c, egui::ViewportCommand::Minimized(true))));
+        assert!(!cmds
+            .iter()
+            .any(|c| matches!(c, egui::ViewportCommand::CancelClose)));
+        assert!(!cmds
+            .iter()
+            .any(|c| matches!(c, egui::ViewportCommand::Visible(false))));
+        assert!(app.core.borrow().controller.is_window_visible());
+        assert!(log.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn titlebar_actions_handle_drag_minimize_maximize_and_close_paths() {
+        let make_input = |maximized: bool| {
+            let mut raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 640.0),
+                )),
+                ..Default::default()
+            };
+            raw.viewports.insert(
+                egui::ViewportId::ROOT,
+                egui::ViewportInfo {
+                    maximized: Some(maximized),
+                    ..Default::default()
+                },
+            );
+            raw
+        };
+
+        // 1. Minimize & StartDrag emit Minimized(true) and StartDrag.
+        let ctx = egui::Context::default();
+        let app = DesktopApp::new_headless(
+            &ctx,
+            AppPrefs::default(),
+            Box::new(MemoryFallbackStore::new()),
+        );
+        let out_min = ctx.run(make_input(false), |c| {
+            let mut core = app.core.borrow_mut();
+            core.handle_titlebar_action(c, TitlebarAction::Minimize);
+            core.handle_titlebar_action(c, TitlebarAction::StartDrag);
+        });
+        let cmds_min = &out_min.viewport_output[&egui::ViewportId::ROOT].commands;
+        assert!(cmds_min
+            .iter()
+            .any(|c| matches!(c, egui::ViewportCommand::Minimized(true))));
+        assert!(cmds_min
+            .iter()
+            .any(|c| matches!(c, egui::ViewportCommand::StartDrag)));
+
+        // 2. ToggleMaximize emits Maximized(true) when unmaximized, Maximized(false) when maximized.
+        let out_max = ctx.run(make_input(false), |c| {
+            app.core
+                .borrow_mut()
+                .handle_titlebar_action(c, TitlebarAction::ToggleMaximize);
+        });
+        assert!(out_max.viewport_output[&egui::ViewportId::ROOT]
+            .commands
+            .iter()
+            .any(|c| matches!(c, egui::ViewportCommand::Maximized(true))));
+
+        let out_restore = ctx.run(make_input(true), |c| {
+            app.core
+                .borrow_mut()
+                .handle_titlebar_action(c, TitlebarAction::ToggleMaximize);
+        });
+        assert!(out_restore.viewport_output[&egui::ViewportId::ROOT]
+            .commands
+            .iter()
+            .any(|c| matches!(c, egui::ViewportCommand::Maximized(false))));
+
+        // 3. Close hides to tray + sends notification when minimize_to_tray & tray supported.
+        let ctx_hide = egui::Context::default();
+        let mut app_hide = DesktopApp::new_headless(
+            &ctx_hide,
+            AppPrefs {
+                minimize_to_tray: true,
+                notifications_enabled: true,
+                ..AppPrefs::default()
+            },
+            Box::new(MemoryFallbackStore::new()),
+        );
+        let (notifier_hide, log_hide) = Notifier::new_recorded(true);
+        app_hide.set_notifier_for_test(notifier_hide);
+        app_hide.set_headless_tray_active_for_test(true);
+        app_hide.set_hide_to_tray_supported_for_test(true);
+
+        let out_hide = ctx_hide.run(make_input(false), |c| {
+            app_hide
+                .core
+                .borrow_mut()
+                .handle_titlebar_action(c, TitlebarAction::Close);
+        });
+        let cmds_hide = &out_hide.viewport_output[&egui::ViewportId::ROOT].commands;
+        assert!(cmds_hide
+            .iter()
+            .any(|c| matches!(c, egui::ViewportCommand::Visible(false))));
+        assert!(!cmds_hide
+            .iter()
+            .any(|c| matches!(c, egui::ViewportCommand::Close)));
+        assert!(!app_hide.core.borrow().quit_requested);
+        assert!(!app_hide.core.borrow().controller.is_window_visible());
+        assert_eq!(log_hide.lock().unwrap().len(), 1);
+
+        // 4. Close performs clean quit when minimize_to_tray is false or hide unsupported.
+        for (min_to_tray, supported) in [(false, true), (true, false)] {
+            let ctx_quit = egui::Context::default();
+            let mut app_quit = DesktopApp::new_headless(
+                &ctx_quit,
+                AppPrefs {
+                    minimize_to_tray: min_to_tray,
+                    notifications_enabled: true,
+                    ..AppPrefs::default()
+                },
+                Box::new(MemoryFallbackStore::new()),
+            );
+            let (notifier_quit, log_quit) = Notifier::new_recorded(true);
+            app_quit.set_notifier_for_test(notifier_quit);
+            app_quit.set_headless_tray_active_for_test(true);
+            app_quit.set_hide_to_tray_supported_for_test(supported);
+
+            let out_quit = ctx_quit.run(make_input(false), |c| {
+                app_quit
+                    .core
+                    .borrow_mut()
+                    .handle_titlebar_action(c, TitlebarAction::Close);
+            });
+            let cmds_quit = &out_quit.viewport_output[&egui::ViewportId::ROOT].commands;
+            assert!(cmds_quit
+                .iter()
+                .any(|c| matches!(c, egui::ViewportCommand::Close)));
+            assert!(!cmds_quit
+                .iter()
+                .any(|c| matches!(c, egui::ViewportCommand::Visible(false))));
+            assert!(app_quit.core.borrow().quit_requested);
+            assert!(log_quit.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn keyboard_zoom_shortcuts_step_clamp_sync_settings_and_disable_builtin_zoom() {
+        let make_key_input = |key: egui::Key, modifiers: egui::Modifiers| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1040.0, 680.0),
+            )),
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }],
+            ..Default::default()
+        };
+        let empty_input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1040.0, 680.0),
+            )),
+            ..Default::default()
+        };
+
+        let ctx = egui::Context::default();
+        let mut app = DesktopApp::new_headless(
+            &ctx,
+            AppPrefs {
+                nim: "251511025".to_string(),
+                ..AppPrefs::default()
+            },
+            Box::new(MemoryFallbackStore::new()),
+        );
+        assert!(
+            ctx.options(|o| !o.zoom_with_keyboard),
+            "built-in egui zoom_with_keyboard must be disabled to prevent double zooming"
+        );
+
+        app.core.borrow_mut().open_settings();
+
+        // Ctrl+= zooms +10% (100 -> 110) and syncs both prefs and open settings state.
+        let _ = ctx.run(
+            make_key_input(egui::Key::Equals, egui::Modifiers::COMMAND),
+            |c| app.update_ui(c),
+        );
+        let _ = ctx.run(empty_input(), |c| app.update_ui(c));
+        assert_eq!(app.prefs().ui_zoom_pct, 110);
+        assert_eq!(app.settings_ui_zoom_pct_for_test(), 110);
+        assert!((ctx.zoom_factor() - 1.10).abs() < 1e-5);
+
+        // Ctrl+Shift+Plus steps up and clamps strictly at 150%.
+        for _ in 0..6 {
+            let _ = ctx.run(
+                make_key_input(
+                    egui::Key::Plus,
+                    egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                ),
+                |c| app.update_ui(c),
+            );
+            let _ = ctx.run(empty_input(), |c| app.update_ui(c));
+        }
+        assert_eq!(app.prefs().ui_zoom_pct, 150);
+        assert_eq!(app.settings_ui_zoom_pct_for_test(), 150);
+        assert!((ctx.zoom_factor() - 1.50).abs() < 1e-5);
+
+        // AltGr (COMMAND + ALT) must not alter zoom.
+        let _ = ctx.run(
+            make_key_input(
+                egui::Key::Minus,
+                egui::Modifiers::COMMAND | egui::Modifiers::ALT,
+            ),
+            |c| app.update_ui(c),
+        );
+        let _ = ctx.run(empty_input(), |c| app.update_ui(c));
+        assert_eq!(app.prefs().ui_zoom_pct, 150);
+
+        // Ctrl+0 resets cleanly to 100%.
+        let _ = ctx.run(
+            make_key_input(egui::Key::Num0, egui::Modifiers::COMMAND),
+            |c| app.update_ui(c),
+        );
+        let _ = ctx.run(empty_input(), |c| app.update_ui(c));
+        assert_eq!(app.prefs().ui_zoom_pct, 100);
+        assert_eq!(app.settings_ui_zoom_pct_for_test(), 100);
+        assert!((ctx.zoom_factor() - 1.00).abs() < 1e-5);
+
+        // Ctrl+- steps down and clamps strictly at 70%.
+        for _ in 0..5 {
+            let _ = ctx.run(
+                make_key_input(egui::Key::Minus, egui::Modifiers::COMMAND),
+                |c| app.update_ui(c),
+            );
+            let _ = ctx.run(empty_input(), |c| app.update_ui(c));
+        }
+        assert_eq!(app.prefs().ui_zoom_pct, 70);
+        assert_eq!(app.settings_ui_zoom_pct_for_test(), 70);
+        assert!((ctx.zoom_factor() - 0.70).abs() < 1e-5);
+    }
+
+    #[test]
+    fn settings_zoom_preview_reverts_on_cancel_and_persists_on_save() {
+        let empty_input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1040.0, 680.0),
+            )),
+            ..Default::default()
+        };
+
+        let ctx = egui::Context::default();
+        let app = DesktopApp::new_headless(
+            &ctx,
+            AppPrefs {
+                nim: "251511025".to_string(),
+                ui_zoom_pct: 100,
+                ..AppPrefs::default()
+            },
+            Box::new(MemoryFallbackStore::new()),
+        );
+
+        // Preview 135% while Settings is open, then cancel -> reverts to 100% (1.0).
+        {
+            let mut core = app.core.borrow_mut();
+            core.open_settings();
+            core.settings.ui_zoom_pct = 135;
+        }
+        ctx.set_zoom_factor(prefs::zoom_pct_to_factor(135));
+        let _ = ctx.run(empty_input(), |_| {});
+        assert!((ctx.zoom_factor() - 1.35).abs() < 1e-5);
+
+        {
+            let mut core = app.core.borrow_mut();
+            core.close_settings(&ctx);
+        }
+        let _ = ctx.run(empty_input(), |_| {});
+        assert_eq!(app.prefs().ui_zoom_pct, 100);
+        assert_eq!(app.settings_ui_zoom_pct_for_test(), 100);
+        assert!((ctx.zoom_factor() - 1.0).abs() < 1e-5);
+
+        // Reopen, set 135%, and save -> persists and keeps zoom at 1.35.
+        {
+            let mut core = app.core.borrow_mut();
+            core.open_settings();
+            core.settings.ui_zoom_pct = 135;
+            assert!(core.save_settings_inner(&ctx, true));
+        }
+        let _ = ctx.run(empty_input(), |_| {});
+        assert!(!app.is_settings_open());
+        assert_eq!(app.prefs().ui_zoom_pct, 135);
+        assert!((ctx.zoom_factor() - 1.35).abs() < 1e-5);
+    }
+
+    #[test]
+    fn settings_notification_volume_wires_into_test_notification_and_save_revert() {
+        let ctx = egui::Context::default();
+        let mut app = DesktopApp::new_headless(
+            &ctx,
+            AppPrefs {
+                nim: "251511025".to_string(),
+                notification_sound: true,
+                notification_volume: 85,
+                ..AppPrefs::default()
+            },
+            Box::new(MemoryFallbackStore::new()),
+        );
+        assert_eq!(app.notifier_sound_volume_for_test(), 85);
+
+        let (recorded, log) = Notifier::new_recorded(true);
+        app.set_notifier_for_test(recorded);
+
+        {
+            let mut core = app.core.borrow_mut();
+            core.open_settings();
+            assert_eq!(core.settings.notification_volume, 85);
+            core.settings.notification_volume = 35;
+            core.handle_test_notification(&ctx);
+        }
+        assert_eq!(app.notifier_sound_volume_for_test(), 35);
+        assert_eq!(log.lock().unwrap().len(), 1);
+
+        // Cancel reverts settings & notifier volume back to saved prefs (85).
+        {
+            let mut core = app.core.borrow_mut();
+            core.close_settings(&ctx);
+        }
+        assert_eq!(app.settings_notification_volume_for_test(), 85);
+        assert_eq!(app.notifier_sound_volume_for_test(), 85);
+        assert_eq!(app.prefs().notification_volume, 85);
+
+        // Save at 0% persists and wires to notifier.
+        {
+            let mut core = app.core.borrow_mut();
+            core.open_settings();
+            core.settings.notification_volume = 0;
+            assert!(core.save_settings_inner(&ctx, true));
+        }
+        assert_eq!(app.prefs().notification_volume, 0);
+        assert_eq!(app.notifier_sound_volume_for_test(), 0);
     }
 }

@@ -8,7 +8,11 @@ use egui::{
 };
 
 use crate::credentials::CredentialBackend;
-use crate::prefs::{AppPrefs, DarkThemePreset, LightThemePreset, ThemePreference};
+use crate::prefs::{
+    clamp_notification_volume, clamp_ui_zoom_pct, AppPrefs, DarkThemePreset, LightThemePreset,
+    ThemePreference, DEFAULT_NOTIFICATION_VOLUME, DEFAULT_UI_ZOOM_PCT, MAX_NOTIFICATION_VOLUME,
+    MAX_UI_ZOOM_PCT, MIN_NOTIFICATION_VOLUME, MIN_UI_ZOOM_PCT,
+};
 use crate::theme::{AppearanceConfig, Palette, ThemeTokens};
 use crate::ui::{
     action_button, hairline_divider, icons, labeled_text_input, mono_text, paint_focus_ring,
@@ -17,7 +21,7 @@ use crate::ui::{
 use crate::updater::{UpdateStatus, CURRENT_VERSION};
 
 /// Editable settings and onboarding form state; `Debug` redacts the password buffer.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct SettingsState {
     pub open: bool,
     pub nim: String,
@@ -36,13 +40,21 @@ pub struct SettingsState {
     pub theme: ThemePreference,
     pub light_preset: LightThemePreset,
     pub dark_preset: DarkThemePreset,
+    pub ui_zoom_pct: u16,
     pub minimize_to_tray: bool,
     pub autostart: bool,
     pub notifications_enabled: bool,
     pub notification_sound: bool,
+    pub notification_volume: u8,
     pub auto_start_monitoring: bool,
     pub status_message: Option<String>,
     pub status_is_error: bool,
+}
+
+impl Default for SettingsState {
+    fn default() -> Self {
+        Self::from_prefs(&AppPrefs::default(), String::new())
+    }
 }
 
 impl fmt::Debug for SettingsState {
@@ -56,6 +68,9 @@ impl fmt::Debug for SettingsState {
             .field("theme", &self.theme)
             .field("light_preset", &self.light_preset)
             .field("dark_preset", &self.dark_preset)
+            .field("ui_zoom_pct", &self.ui_zoom_pct)
+            .field("notification_sound", &self.notification_sound)
+            .field("notification_volume", &self.notification_volume)
             .finish()
     }
 }
@@ -80,10 +95,12 @@ impl SettingsState {
             theme: prefs.theme,
             light_preset: prefs.light_preset,
             dark_preset: prefs.dark_preset,
+            ui_zoom_pct: clamp_ui_zoom_pct(prefs.ui_zoom_pct),
             minimize_to_tray: prefs.minimize_to_tray,
             autostart: prefs.autostart,
             notifications_enabled: prefs.notifications_enabled,
             notification_sound: prefs.notification_sound,
+            notification_volume: clamp_notification_volume(prefs.notification_volume),
             auto_start_monitoring: prefs.auto_start_monitoring,
             status_message: None,
             status_is_error: false,
@@ -145,6 +162,8 @@ impl SettingsState {
         self.max_retry = max_retry;
         self.delay_min = delay_min;
         self.delay_max = delay_max;
+        self.ui_zoom_pct = clamp_ui_zoom_pct(self.ui_zoom_pct);
+        self.notification_volume = clamp_notification_volume(self.notification_volume);
         Ok(())
     }
 
@@ -161,10 +180,12 @@ impl SettingsState {
         prefs.theme = self.theme;
         prefs.light_preset = self.light_preset;
         prefs.dark_preset = self.dark_preset;
+        prefs.ui_zoom_pct = clamp_ui_zoom_pct(self.ui_zoom_pct);
         prefs.minimize_to_tray = self.minimize_to_tray;
         prefs.autostart = self.autostart;
         prefs.notifications_enabled = self.notifications_enabled;
         prefs.notification_sound = self.notification_sound;
+        prefs.notification_volume = clamp_notification_volume(self.notification_volume);
         prefs.auto_start_monitoring = self.auto_start_monitoring;
     }
 }
@@ -184,6 +205,7 @@ pub enum SettingsAction {
     ImportDotenv,
     ExportDiagnosticHtml,
     PreviewTheme(AppearanceConfig),
+    PreviewZoom(u16),
     TestNotification,
     CheckForUpdates,
     StartUpdate,
@@ -631,6 +653,307 @@ fn render_preset_dropdown_row<T: Copy + PartialEq>(
     changed
 }
 
+struct SliderSpec {
+    id_salt: &'static str,
+    min: u16,
+    max: u16,
+    step: u16,
+    keyboard_step: u16,
+    default_tick: Option<u16>,
+    enabled: bool,
+    min_label: &'static str,
+    max_label: &'static str,
+}
+
+struct SliderOutcome {
+    commit_preview: bool,
+}
+
+fn render_mono_pill(ui: &mut egui::Ui, palette: &Palette, text: &str, active: bool) {
+    let fg = if active {
+        palette.text_primary
+    } else {
+        palette.text_secondary
+    };
+    egui::Frame::none()
+        .fill(palette.bg_subtle)
+        .stroke(Stroke::new(1.0_f32, palette.border_subtle))
+        .rounding(Rounding::same(ThemeTokens::RADIUS_TAG))
+        .inner_margin(egui::Margin::symmetric(8.0, 3.0))
+        .show(ui, |ui| {
+            ui.label(mono_text(text, 12.0, fg));
+        });
+}
+
+fn compact_reset_button(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    label: &str,
+    enabled: bool,
+) -> egui::Response {
+    let inner = ui.add_enabled_ui(enabled, |ui| {
+        let galley = ui.painter().layout_no_wrap(
+            label.to_string(),
+            egui::FontId::new(
+                12.0,
+                FontFamily::Name(ThemeTokens::FONT_SEMIBOLD_FAMILY.into()),
+            ),
+            palette.text_primary,
+        );
+        let desired_size = Vec2::new((galley.size().x + 20.0).max(52.0), 28.0);
+        let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click());
+        let response = if enabled {
+            response.on_hover_cursor(CursorIcon::PointingHand)
+        } else {
+            if ui.rect_contains_pointer(rect) {
+                ui.ctx().set_cursor_icon(CursorIcon::NotAllowed);
+            }
+            response
+        };
+
+        if ui.is_rect_visible(rect) {
+            let hovered = enabled && response.hovered();
+            let pressed = enabled && response.is_pointer_button_down_on();
+            let (fill, border, fg) = if !enabled {
+                (
+                    palette.bg_subtle,
+                    Stroke::new(1.0_f32, palette.border_subtle),
+                    palette.text_secondary,
+                )
+            } else {
+                let bg = if pressed || hovered {
+                    palette.bg_subtle
+                } else {
+                    palette.bg_surface
+                };
+                let stroke_color = if hovered {
+                    palette.accent_text
+                } else {
+                    palette.border_interactive
+                };
+                (bg, Stroke::new(1.1_f32, stroke_color), palette.text_primary)
+            };
+
+            ui.painter()
+                .rect(rect, Rounding::same(ThemeTokens::RADIUS_TAG), fill, border);
+            let text_galley = ui.painter().layout_no_wrap(
+                label.to_string(),
+                egui::FontId::new(
+                    12.0,
+                    FontFamily::Name(ThemeTokens::FONT_SEMIBOLD_FAMILY.into()),
+                ),
+                fg,
+            );
+            let text_pos = Pos2::new(
+                rect.center().x - text_galley.size().x * 0.5,
+                rect.center().y - text_galley.size().y * 0.5,
+            );
+            ui.painter().galley(text_pos, text_galley, fg);
+            paint_focus_ring(ui, &response, palette, ThemeTokens::RADIUS_TAG);
+        }
+
+        response
+    });
+    inner.inner
+}
+
+fn render_themed_slider(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    value: &mut u16,
+    spec: SliderSpec,
+) -> SliderOutcome {
+    let mut outcome = SliderOutcome {
+        commit_preview: false,
+    };
+
+    let avail_w = ui.available_width().max(120.0);
+    let label_font = egui::FontId::new(11.5, FontFamily::Monospace);
+    let min_galley = ui.painter().layout_no_wrap(
+        spec.min_label.to_string(),
+        label_font.clone(),
+        palette.text_secondary,
+    );
+    let max_galley = ui.painter().layout_no_wrap(
+        spec.max_label.to_string(),
+        label_font,
+        palette.text_secondary,
+    );
+    let gap = ThemeTokens::SPACE_SM;
+    let left_w = min_galley.size().x.ceil();
+    let right_w = max_galley.size().x.ceil();
+    let slider_w = (avail_w - left_w - right_w - gap * 2.0).max(72.0);
+    let row_h = 28.0;
+
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+
+        let (left_rect, _) = ui.allocate_exact_size(Vec2::new(left_w, row_h), Sense::hover());
+        if ui.is_rect_visible(left_rect) {
+            ui.painter().galley(
+                Pos2::new(
+                    left_rect.left(),
+                    left_rect.center().y - min_galley.size().y * 0.5,
+                ),
+                min_galley,
+                palette.text_secondary,
+            );
+        }
+
+        let (_, rect) = ui.allocate_space(Vec2::new(slider_w, row_h));
+        let sense = if spec.enabled {
+            Sense::click_and_drag()
+        } else {
+            Sense::hover()
+        };
+        let mut response = ui.interact(rect, ui.id().with(spec.id_salt), sense);
+        if spec.enabled {
+            response = response.on_hover_cursor(CursorIcon::PointingHand);
+        } else if ui.rect_contains_pointer(rect) {
+            ui.ctx().set_cursor_icon(CursorIcon::NotAllowed);
+        }
+
+        let thumb_pad = 9.0_f32;
+        let usable_left = rect.left() + thumb_pad;
+        let usable_right = (rect.right() - thumb_pad).max(usable_left + 1.0);
+        let usable_w = (usable_right - usable_left).max(1.0);
+        let span = f32::from(spec.max.saturating_sub(spec.min).max(1));
+
+        if spec.enabled {
+            if response.clicked() || response.drag_started() {
+                response.request_focus();
+            }
+            if let Some(pos) = response.interact_pointer_pos() {
+                let raw_t = ((pos.x - usable_left) / usable_w).clamp(0.0, 1.0);
+                let step = f32::from(spec.step.max(1));
+                let raw = f32::from(spec.min) + raw_t * span;
+                let snapped =
+                    ((raw - f32::from(spec.min)) / step).round() * step + f32::from(spec.min);
+                let next = (snapped.round() as u16).clamp(spec.min, spec.max);
+                *value = next;
+            }
+            if response.clicked() || response.drag_stopped() {
+                outcome.commit_preview = true;
+            }
+            if response.has_focus() {
+                let mut next = *value;
+                if ui.input(|i| {
+                    i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::ArrowUp)
+                }) {
+                    next = next.saturating_add(spec.keyboard_step).min(spec.max);
+                }
+                if ui.input(|i| {
+                    i.key_pressed(egui::Key::ArrowLeft) || i.key_pressed(egui::Key::ArrowDown)
+                }) {
+                    next = next.saturating_sub(spec.keyboard_step).max(spec.min);
+                }
+                if ui.input(|i| i.key_pressed(egui::Key::Home)) {
+                    next = spec.min;
+                }
+                if ui.input(|i| i.key_pressed(egui::Key::End)) {
+                    next = spec.max;
+                }
+                if next != *value {
+                    *value = next;
+                    outcome.commit_preview = true;
+                }
+            }
+        }
+
+        if ui.is_rect_visible(rect) {
+            let clamped = (*value).clamp(spec.min, spec.max);
+            let t = f32::from(clamped - spec.min) / span;
+            let thumb_x = usable_left + t * usable_w;
+
+            let track_h = 6.0_f32;
+            let track_rect = Rect::from_min_max(
+                Pos2::new(usable_left, rect.center().y - track_h * 0.5),
+                Pos2::new(usable_right, rect.center().y + track_h * 0.5),
+            );
+            let track_border = if spec.enabled {
+                palette.border_interactive
+            } else {
+                palette.border_subtle
+            };
+            ui.painter().rect(
+                track_rect,
+                Rounding::same(3.0),
+                palette.bg_subtle,
+                Stroke::new(1.0_f32, track_border),
+            );
+
+            if let Some(tick) = spec.default_tick {
+                if tick > spec.min && tick < spec.max {
+                    let tick_t = f32::from(tick - spec.min) / span;
+                    let tick_x = usable_left + tick_t * usable_w;
+                    ui.painter().line_segment(
+                        [
+                            Pos2::new(tick_x, track_rect.top() - 3.0),
+                            Pos2::new(tick_x, track_rect.bottom() + 3.0),
+                        ],
+                        Stroke::new(1.5_f32, track_border),
+                    );
+                }
+            }
+
+            if clamped > spec.min {
+                let active_rect = Rect::from_min_max(
+                    track_rect.min,
+                    Pos2::new(
+                        thumb_x.max(track_rect.left() + 3.0).min(track_rect.right()),
+                        track_rect.max.y,
+                    ),
+                );
+                let active_fill = if spec.enabled {
+                    palette.accent_text
+                } else {
+                    palette.border_subtle
+                };
+                ui.painter()
+                    .rect_filled(active_rect, Rounding::same(3.0), active_fill);
+            }
+
+            let thumb_r = if spec.enabled && (response.hovered() || response.dragged()) {
+                8.5
+            } else {
+                7.5
+            };
+            let (thumb_fill, thumb_stroke) = if spec.enabled {
+                (
+                    palette.accent_text,
+                    Stroke::new(2.0_f32, palette.bg_surface),
+                )
+            } else {
+                (
+                    palette.bg_subtle,
+                    Stroke::new(1.5_f32, palette.border_interactive),
+                )
+            };
+            ui.painter().circle(
+                Pos2::new(thumb_x, rect.center().y),
+                thumb_r,
+                thumb_fill,
+                thumb_stroke,
+            );
+            paint_focus_ring(ui, &response, palette, ThemeTokens::RADIUS_CONTROL);
+        }
+
+        let (right_rect, _) = ui.allocate_exact_size(Vec2::new(right_w, row_h), Sense::hover());
+        if ui.is_rect_visible(right_rect) {
+            ui.painter().galley(
+                Pos2::new(
+                    right_rect.right() - max_galley.size().x,
+                    right_rect.center().y - max_galley.size().y * 0.5,
+                ),
+                max_galley,
+                palette.text_secondary,
+            );
+        }
+    });
+
+    outcome
+}
+
 /// Render the inline first-run onboarding card directly in the main area when no account is set.
 pub fn show_onboarding(
     ui: &mut egui::Ui,
@@ -1024,11 +1347,109 @@ pub fn show(
                                                 dark_palette.text_primary,
                                             );
                                             hairline_divider(ui, palette.border_subtle);
-                                            render_color_token_row(
+                                             render_color_token_row(
                                                 ui,
                                                 palette,
                                                 "Accent",
                                                 dark_palette.accent,
+                                            );
+                                        });
+
+                                    ui.add_space(ThemeTokens::SPACE_MD);
+
+                                    // UI Zoom In/Out Card
+                                    egui::Frame::none()
+                                        .fill(palette.bg_surface)
+                                        .stroke(Stroke::new(1.0_f32, palette.border_subtle))
+                                        .rounding(Rounding::same(ThemeTokens::RADIUS_CARD))
+                                        .inner_margin(egui::Margin::same(ThemeTokens::SPACE_MD))
+                                        .show(ui, |ui| {
+                                            ui.set_width(ui.available_width());
+                                            ui.spacing_mut().item_spacing.y = 0.0;
+
+                                            let row_w = ui.available_width();
+                                            ui.horizontal(|ui| {
+                                                let right_reserve = 122.0;
+                                                let left_w = (row_w - right_reserve).max(96.0);
+                                                ui.allocate_ui_with_layout(
+                                                    Vec2::new(left_w, 28.0),
+                                                    Layout::left_to_right(Align::Center),
+                                                    |ui| {
+                                                        ui.add(
+                                                            egui::Label::new(semibold_text(
+                                                                "Skala Tampilan (Zoom)",
+                                                                13.0,
+                                                                palette.text_primary,
+                                                            ))
+                                                            .wrap(),
+                                                        );
+                                                    },
+                                                );
+                                                ui.with_layout(
+                                                    Layout::right_to_left(Align::Center),
+                                                    |ui| {
+                                                        ui.spacing_mut().item_spacing.x =
+                                                            ThemeTokens::SPACE_SM;
+                                                        let can_reset = state.ui_zoom_pct
+                                                            != DEFAULT_UI_ZOOM_PCT;
+                                                        let reset_resp = compact_reset_button(
+                                                            ui, palette, "Reset", can_reset,
+                                                        );
+                                                        if can_reset && reset_resp.clicked() {
+                                                            state.ui_zoom_pct = DEFAULT_UI_ZOOM_PCT;
+                                                            action =
+                                                                Some(SettingsAction::PreviewZoom(
+                                                                    DEFAULT_UI_ZOOM_PCT,
+                                                                ));
+                                                        }
+                                                        let zoom_badge =
+                                                            format!("{}%", state.ui_zoom_pct);
+                                                        render_mono_pill(
+                                                            ui,
+                                                            palette,
+                                                            &zoom_badge,
+                                                            true,
+                                                        );
+                                                    },
+                                                );
+                                            });
+
+                                            ui.add_space(ThemeTokens::SPACE_SM);
+                                            let zoom_slider = render_themed_slider(
+                                                ui,
+                                                palette,
+                                                &mut state.ui_zoom_pct,
+                                                SliderSpec {
+                                                    id_salt: "ui_zoom_pct_slider",
+                                                    min: MIN_UI_ZOOM_PCT,
+                                                    max: MAX_UI_ZOOM_PCT,
+                                                    step: 5,
+                                                    keyboard_step: 5,
+                                                    default_tick: Some(DEFAULT_UI_ZOOM_PCT),
+                                                    enabled: true,
+                                                    min_label: "70%",
+                                                    max_label: "150%",
+                                                },
+                                            );
+                                            if zoom_slider.commit_preview {
+                                                action = Some(SettingsAction::PreviewZoom(
+                                                    state.ui_zoom_pct,
+                                                ));
+                                            }
+
+                                            ui.add_space(6.0);
+                                            let zoom_hint = if cfg!(target_os = "macos") {
+                                                "Pintasan: gunakan Cmd + / Cmd - untuk zoom in/out, atau Cmd + 0 untuk reset ke 100%."
+                                            } else {
+                                                "Pintasan: gunakan Ctrl + / Ctrl - untuk zoom in/out, atau Ctrl + 0 untuk reset ke 100%."
+                                            };
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(zoom_hint)
+                                                        .size(11.5)
+                                                        .color(palette.text_secondary),
+                                                )
+                                                .wrap(),
                                             );
                                         });
 
@@ -1069,7 +1490,7 @@ pub fn show(
                                                         ui.add(
                                                             egui::Label::new(
                                                                 RichText::new(
-                                                                    "Pada sesi Wayland, menutup jendela tetap menghentikan aplikasi karena jendela tidak dapat disembunyikan ke tray.",
+                                                                    "Menutup jendela tetap menghentikan aplikasi saat berjalan di sesi Wayland native atau ketika layanan system tray (mis. AppIndicator/StatusNotifier) tidak tersedia.",
                                                                 )
                                                                 .size(11.5)
                                                                 .color(palette.text_secondary),
@@ -1092,6 +1513,104 @@ pub fn show(
                                                 &mut state.notification_sound,
                                                 "Putar suara notifikasi",
                                             );
+                                            hairline_divider(ui, palette.border_subtle);
+                                            egui::Frame::none()
+                                                .inner_margin(egui::Margin::symmetric(
+                                                    ThemeTokens::SPACE_MD,
+                                                    ThemeTokens::SPACE_SM + 2.0,
+                                                ))
+                                                .show(ui, |ui| {
+                                                    ui.set_width(ui.available_width());
+                                                    ui.spacing_mut().item_spacing.y = 0.0;
+                                                    let sound_on = state.notification_sound;
+                                                    ui.add_enabled_ui(sound_on, |ui| {
+                                                        let row_w = ui.available_width();
+                                                        let vol_label_color = if sound_on {
+                                                            palette.text_primary
+                                                        } else {
+                                                            palette.text_secondary
+                                                        };
+                                                        let vol_readout =
+                                                            if state.notification_volume == 0 {
+                                                                "Bisu (0%)".to_string()
+                                                            } else {
+                                                                format!(
+                                                                    "{}%",
+                                                                    state.notification_volume
+                                                                )
+                                                            };
+                                                        ui.horizontal(|ui| {
+                                                            let right_reserve = 92.0;
+                                                            let left_w =
+                                                                (row_w - right_reserve).max(96.0);
+                                                            ui.allocate_ui_with_layout(
+                                                                Vec2::new(left_w, 24.0),
+                                                                Layout::left_to_right(
+                                                                    Align::Center,
+                                                                ),
+                                                                |ui| {
+                                                                    ui.add(
+                                                                        egui::Label::new(
+                                                                            RichText::new(
+                                                                                "Volume suara notifikasi",
+                                                                            )
+                                                                            .size(13.0)
+                                                                            .color(vol_label_color),
+                                                                        )
+                                                                        .wrap(),
+                                                                    );
+                                                                },
+                                                            );
+                                                            ui.with_layout(
+                                                                Layout::right_to_left(
+                                                                    Align::Center,
+                                                                ),
+                                                                |ui| {
+                                                                    render_mono_pill(
+                                                                        ui,
+                                                                        palette,
+                                                                        &vol_readout,
+                                                                        sound_on
+                                                                            && state
+                                                                                .notification_volume
+                                                                                > 0,
+                                                                    );
+                                                                },
+                                                            );
+                                                        });
+
+                                                        ui.add_space(6.0);
+                                                        let mut vol_u16 =
+                                                            u16::from(state.notification_volume);
+                                                        render_themed_slider(
+                                                            ui,
+                                                            palette,
+                                                            &mut vol_u16,
+                                                            SliderSpec {
+                                                                id_salt:
+                                                                    "notification_volume_slider",
+                                                                min: u16::from(
+                                                                    MIN_NOTIFICATION_VOLUME,
+                                                                ),
+                                                                max: u16::from(
+                                                                    MAX_NOTIFICATION_VOLUME,
+                                                                ),
+                                                                step: 1,
+                                                                keyboard_step: 5,
+                                                                default_tick: Some(u16::from(
+                                                                    DEFAULT_NOTIFICATION_VOLUME,
+                                                                )),
+                                                                enabled: sound_on,
+                                                                min_label: "0%",
+                                                                max_label: "100%",
+                                                            },
+                                                        );
+                                                        state.notification_volume =
+                                                            clamp_notification_volume(
+                                                                vol_u16 as u8,
+                                                            );
+                                                    });
+                                                });
                                             hairline_divider(ui, palette.border_subtle);
                                             switch_row(
                                                 ui,

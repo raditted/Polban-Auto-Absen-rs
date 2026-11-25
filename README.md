@@ -34,7 +34,7 @@ Oleh [raditted](https://github.com/raditted), berdasarkan proyek asli oleh Haika
 ### 3. Jalankan dan kelola aplikasi
 
 - Klik **Jalankan Presensi Otomatis** di bagian atas untuk mulai memantau jadwal dan menekan tombol presensi biru secara otomatis.
-- Jika Anda menekan tombol tutup (`X`), jendela disembunyikan ke system tray dan notifikasi desktop akan memberi tahu bahwa aplikasi masih berjalan di latar belakang. Klik ikon di system tray untuk membuka jendela kembali, atau klik kanan lalu pilih **Keluar** untuk menutup aplikasi sepenuhnya. Pada sesi Linux Wayland native, tombol tutup langsung menutup aplikasi (lihat [linux/README.md](linux/README.md) untuk opsi XWayland).
+- Jika Anda menekan tombol tutup (`X`), jendela disembunyikan ke system tray dan notifikasi desktop akan memberi tahu bahwa aplikasi masih berjalan di latar belakang. Klik ikon di system tray untuk membuka jendela kembali, atau klik kanan lalu pilih **Keluar** untuk menutup aplikasi sepenuhnya. Di Linux, aplikasi otomatis memakai X11/XWayland bila tersedia sehingga system tray aktif di sebagian besar desktop; pada sesi Wayland murni atau desktop tanpa layanan system tray (misalnya GNOME tanpa ekstensi AppIndicator), tombol tutup langsung menutup aplikasi (lihat [linux/README.md](linux/README.md)).
 - Saat versi baru tersedia, tombol **Update** akan muncul di bilah atas tanpa mengganggu pemakaian. Klik tombol tersebut untuk mengunduh pembaruan di latar belakang, lalu klik **Restart untuk Update** ketika verifikasi selesai.
 
 Shortcut keyboard di aplikasi desktop: `Ctrl+,` (Pengaturan), `Escape` (tutup Pengaturan), `Ctrl+R` (Mulai atau Hentikan pemantauan), `F5` (Cek Sekarang), `Ctrl+Q` (Keluar penuh).

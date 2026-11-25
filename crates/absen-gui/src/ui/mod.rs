@@ -6,6 +6,7 @@ pub mod icons;
 pub mod jadwal;
 pub mod proof;
 pub mod settings;
+pub mod titlebar;
 
 use std::borrow::Cow;
 
@@ -102,6 +103,15 @@ pub fn hairline_divider(ui: &mut egui::Ui, color: Color32) {
     }
 }
 
+/// Draw a high-contrast 2px keyboard focus ring around `rect`.
+pub fn paint_focus_ring_in_rect(ui: &mut egui::Ui, rect: Rect, palette: &Palette, rounding: f32) {
+    ui.painter().rect_stroke(
+        rect,
+        Rounding::same(rounding),
+        Stroke::new(ThemeTokens::FOCUS_STROKE_WIDTH, palette.accent_text),
+    );
+}
+
 /// Draw a high-contrast 2px keyboard focus ring around `response` when focused.
 pub fn paint_focus_ring(
     ui: &mut egui::Ui,
@@ -110,11 +120,7 @@ pub fn paint_focus_ring(
     rounding: f32,
 ) {
     if response.has_focus() {
-        ui.painter().rect_stroke(
-            response.rect.expand(2.0),
-            Rounding::same(rounding + 1.5),
-            Stroke::new(ThemeTokens::FOCUS_STROKE_WIDTH, palette.accent_text),
-        );
+        paint_focus_ring_in_rect(ui, response.rect.expand(2.0), palette, rounding + 1.5);
     }
 }
 

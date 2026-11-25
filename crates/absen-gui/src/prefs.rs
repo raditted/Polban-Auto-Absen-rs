@@ -14,6 +14,34 @@ use thiserror::Error;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Minimum supported UI zoom percentage (`70%` -> `0.70x`).
+pub const MIN_UI_ZOOM_PCT: u16 = 70;
+/// Maximum supported UI zoom percentage (`150%` -> `1.50x`).
+pub const MAX_UI_ZOOM_PCT: u16 = 150;
+/// Default UI zoom percentage (`100%` -> `1.00x`).
+pub const DEFAULT_UI_ZOOM_PCT: u16 = 100;
+/// Minimum notification sound volume percentage (`0%`, muted).
+pub const MIN_NOTIFICATION_VOLUME: u8 = 0;
+/// Maximum notification sound volume percentage (`100%`).
+pub const MAX_NOTIFICATION_VOLUME: u8 = 100;
+/// Default notification sound volume percentage (`100%`).
+pub const DEFAULT_NOTIFICATION_VOLUME: u8 = 100;
+
+/// Clamp a UI zoom percentage into `MIN_UI_ZOOM_PCT..=MAX_UI_ZOOM_PCT`.
+pub fn clamp_ui_zoom_pct(pct: u16) -> u16 {
+    pct.clamp(MIN_UI_ZOOM_PCT, MAX_UI_ZOOM_PCT)
+}
+
+/// Convert a UI zoom percentage (`70..=150`) into an egui zoom factor (`0.70..=1.50`).
+pub fn zoom_pct_to_factor(pct: u16) -> f32 {
+    f32::from(clamp_ui_zoom_pct(pct)) / 100.0
+}
+
+/// Clamp a notification volume percentage into `0..=100`.
+pub fn clamp_notification_volume(volume_pct: u8) -> u8 {
+    volume_pct.min(MAX_NOTIFICATION_VOLUME)
+}
+
 /// User-selectable color theme mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -131,6 +159,30 @@ fn default_true() -> bool {
     true
 }
 
+fn default_ui_zoom_pct() -> u16 {
+    DEFAULT_UI_ZOOM_PCT
+}
+
+fn default_notification_volume() -> u8 {
+    DEFAULT_NOTIFICATION_VOLUME
+}
+
+fn deserialize_ui_zoom_pct<'de, D>(deserializer: D) -> Result<u16, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = u16::deserialize(deserializer)?;
+    Ok(clamp_ui_zoom_pct(raw))
+}
+
+fn deserialize_notification_volume<'de, D>(deserializer: D) -> Result<u8, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = u8::deserialize(deserializer)?;
+    Ok(clamp_notification_volume(raw))
+}
+
 /// Non-secret user preferences stored in `prefs.json`.
 /// Passwords are never serialized here; they belong in `CredentialStore`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -147,11 +199,21 @@ pub struct AppPrefs {
     pub theme: ThemePreference,
     pub light_preset: LightThemePreset,
     pub dark_preset: DarkThemePreset,
+    #[serde(
+        default = "default_ui_zoom_pct",
+        deserialize_with = "deserialize_ui_zoom_pct"
+    )]
+    pub ui_zoom_pct: u16,
     pub minimize_to_tray: bool,
     pub autostart: bool,
     pub notifications_enabled: bool,
     #[serde(default = "default_true")]
     pub notification_sound: bool,
+    #[serde(
+        default = "default_notification_volume",
+        deserialize_with = "deserialize_notification_volume"
+    )]
+    pub notification_volume: u8,
     pub auto_start_monitoring: bool,
     pub state_file: Option<PathBuf>,
 }
@@ -170,10 +232,12 @@ impl Default for AppPrefs {
             theme: ThemePreference::System,
             light_preset: LightThemePreset::DefaultLight,
             dark_preset: DarkThemePreset::DefaultDark,
+            ui_zoom_pct: DEFAULT_UI_ZOOM_PCT,
             minimize_to_tray: true,
             autostart: false,
             notifications_enabled: true,
             notification_sound: true,
+            notification_volume: DEFAULT_NOTIFICATION_VOLUME,
             auto_start_monitoring: false,
             state_file: None,
         }
@@ -181,6 +245,22 @@ impl Default for AppPrefs {
 }
 
 impl AppPrefs {
+    /// Clamp zoom and volume fields into their safe supported ranges.
+    pub fn sanitize(&mut self) {
+        self.ui_zoom_pct = clamp_ui_zoom_pct(self.ui_zoom_pct);
+        self.notification_volume = clamp_notification_volume(self.notification_volume);
+    }
+
+    /// Return the clamped UI zoom factor (`0.70..=1.50`).
+    pub fn normalized_ui_zoom(&self) -> f32 {
+        zoom_pct_to_factor(self.ui_zoom_pct)
+    }
+
+    /// Return the clamped notification volume percentage (`0..=100`).
+    pub fn normalized_notification_volume(&self) -> u8 {
+        clamp_notification_volume(self.notification_volume)
+    }
+
     /// Convert desktop preferences plus a retrieved secret password into `absen_core::Config`.
     pub fn to_core_config(&self, password: String) -> Config {
         let base_url = self.base_url.trim().trim_end_matches('/').to_string();
@@ -253,7 +333,8 @@ pub fn load_from_path(path: &Path) -> Result<AppPrefs, PrefsError> {
         return Ok(AppPrefs::default());
     }
     let raw = std::fs::read_to_string(path)?;
-    let prefs = serde_json::from_str(&raw)?;
+    let mut prefs: AppPrefs = serde_json::from_str(&raw)?;
+    prefs.sanitize();
     Ok(prefs)
 }
 
@@ -403,10 +484,12 @@ mod tests {
             theme: ThemePreference::Dark,
             light_preset: LightThemePreset::Catppuccin,
             dark_preset: DarkThemePreset::Everforest,
+            ui_zoom_pct: 125,
             minimize_to_tray: false,
             autostart: true,
             notifications_enabled: false,
             notification_sound: false,
+            notification_volume: 60,
             auto_start_monitoring: true,
             state_file: Some(dir.join("clicked.json")),
         };
@@ -549,6 +632,66 @@ mod tests {
         .unwrap();
         let res_single = import_dotenv_file(&single_quoted).unwrap();
         assert_eq!(res_single.password.as_deref(), Some("quoted#value"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ui_zoom_and_notification_volume_default_roundtrip_and_clamp() {
+        let legacy_json = r#"{
+            "nim": "251511099",
+            "theme": "light"
+        }"#;
+        let legacy: AppPrefs = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(legacy.ui_zoom_pct, DEFAULT_UI_ZOOM_PCT);
+        assert_eq!(legacy.notification_volume, DEFAULT_NOTIFICATION_VOLUME);
+        assert!((legacy.normalized_ui_zoom() - 1.0).abs() < f32::EPSILON);
+        assert_eq!(legacy.normalized_notification_volume(), 100);
+
+        let out_of_range_low = r#"{
+            "ui_zoom_pct": 15,
+            "notification_volume": 0
+        }"#;
+        let low: AppPrefs = serde_json::from_str(out_of_range_low).unwrap();
+        assert_eq!(low.ui_zoom_pct, MIN_UI_ZOOM_PCT);
+        assert_eq!(low.notification_volume, 0);
+        assert!((low.normalized_ui_zoom() - 0.70).abs() < 1e-6);
+
+        let out_of_range_high = r#"{
+            "ui_zoom_pct": 420,
+            "notification_volume": 250
+        }"#;
+        let high: AppPrefs = serde_json::from_str(out_of_range_high).unwrap();
+        assert_eq!(high.ui_zoom_pct, MAX_UI_ZOOM_PCT);
+        assert_eq!(high.notification_volume, 100);
+        assert!((high.normalized_ui_zoom() - 1.50).abs() < 1e-6);
+
+        let dir = temp_dir("zoom_vol");
+        let path = dir.join("prefs.json");
+        std::fs::write(&path, out_of_range_high).unwrap();
+        let loaded_clamped = load_from_path(&path).unwrap();
+        assert_eq!(loaded_clamped.ui_zoom_pct, MAX_UI_ZOOM_PCT);
+        assert_eq!(loaded_clamped.notification_volume, 100);
+
+        let manual = AppPrefs {
+            ui_zoom_pct: 135,
+            notification_volume: 42,
+            ..AppPrefs::default()
+        };
+        save_to_path(&manual, &path).unwrap();
+        let roundtrip = load_from_path(&path).unwrap();
+        assert_eq!(roundtrip.ui_zoom_pct, 135);
+        assert_eq!(roundtrip.notification_volume, 42);
+        assert!((roundtrip.normalized_ui_zoom() - 1.35).abs() < 1e-6);
+        assert_eq!(roundtrip.normalized_notification_volume(), 42);
+
+        let unclamped_struct = AppPrefs {
+            ui_zoom_pct: 10,
+            notification_volume: 180,
+            ..AppPrefs::default()
+        };
+        assert!((unclamped_struct.normalized_ui_zoom() - 0.70).abs() < 1e-6);
+        assert_eq!(unclamped_struct.normalized_notification_volume(), 100);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

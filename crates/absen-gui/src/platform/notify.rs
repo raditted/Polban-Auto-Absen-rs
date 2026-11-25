@@ -17,6 +17,7 @@ pub type ToastWakeCallback = Arc<dyn Fn() + Send + Sync>;
 pub struct Notifier {
     enabled: bool,
     sound_enabled: bool,
+    sound_volume: u8,
     palette: Palette,
     wake_hwnd: isize,
     wake_callback: Option<ToastWakeCallback>,
@@ -28,6 +29,7 @@ impl fmt::Debug for Notifier {
         f.debug_struct("Notifier")
             .field("enabled", &self.enabled)
             .field("sound_enabled", &self.sound_enabled)
+            .field("sound_volume", &self.sound_volume)
             .field("palette", &self.palette)
             .field("wake_hwnd", &self.wake_hwnd)
             .field("has_wake_callback", &self.wake_callback.is_some())
@@ -48,6 +50,7 @@ impl Notifier {
         Self {
             enabled,
             sound_enabled: true,
+            sound_volume: 100,
             palette: Palette::DARK,
             wake_hwnd: 0,
             wake_callback: None,
@@ -61,6 +64,7 @@ impl Notifier {
         let notifier = Self {
             enabled,
             sound_enabled: true,
+            sound_volume: 100,
             palette: Palette::DARK,
             wake_hwnd: 0,
             wake_callback: None,
@@ -83,6 +87,14 @@ impl Notifier {
 
     pub fn is_sound_enabled(&self) -> bool {
         self.sound_enabled
+    }
+
+    pub fn set_sound_volume(&mut self, volume_pct: u8) {
+        self.sound_volume = volume_pct.min(100);
+    }
+
+    pub fn sound_volume(&self) -> u8 {
+        self.sound_volume
     }
 
     pub fn set_palette(&mut self, palette: Palette) {
@@ -156,8 +168,8 @@ impl Notifier {
             return;
         }
 
-        if self.sound_enabled {
-            super::sound::play_notification_sound();
+        if self.sound_enabled && self.sound_volume > 0 {
+            super::sound::play_notification_sound_with_volume(self.sound_volume);
         }
 
         #[cfg(target_os = "windows")]
@@ -278,5 +290,24 @@ mod tests {
                 "Cek NIM & sandi di Pengaturan.".to_string()
             )
         );
+    }
+
+    #[test]
+    fn sound_volume_defaults_and_clamps_to_100() {
+        let mut notifier = Notifier::new(true);
+        assert_eq!(notifier.sound_volume(), 100);
+
+        let (recorded, _log) = Notifier::new_recorded(true);
+        assert_eq!(recorded.sound_volume(), 100);
+
+        notifier.set_sound_volume(150);
+        assert_eq!(notifier.sound_volume(), 100);
+
+        notifier.set_sound_volume(0);
+        assert_eq!(notifier.sound_volume(), 0);
+
+        notifier.set_sound_volume(65);
+        assert_eq!(notifier.sound_volume(), 65);
+        assert!(format!("{notifier:?}").contains("sound_volume: 65"));
     }
 }

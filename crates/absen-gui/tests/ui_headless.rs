@@ -1952,71 +1952,237 @@ fn settings_wayland_helper_note_renders_without_overflow_or_overlap() {
         ("desktop_1280", Vec2::new(1280.0, 800.0)),
     ];
 
-    for (vp_name, size) in viewports {
-        let ctx = egui::Context::default();
-        let mut app = DesktopApp::new_headless(
-            &ctx,
-            configured_prefs(ThemePreference::Light),
-            Box::new(MemoryFallbackStore::new()),
-        );
-        app.set_hide_to_tray_supported_for_test(false);
-        app.set_test_snapshot(Some(sample_populated_snapshot()));
+    for theme in [ThemePreference::Light, ThemePreference::Dark] {
+        for (vp_name, size) in viewports {
+            let ctx = egui::Context::default();
+            let mut app = DesktopApp::new_headless(
+                &ctx,
+                configured_prefs(theme),
+                Box::new(MemoryFallbackStore::new()),
+            );
+            app.set_hide_to_tray_supported_for_test(false);
+            app.set_test_snapshot(Some(sample_populated_snapshot()));
 
-        let _ = run_frames(
-            &ctx,
-            &mut app,
-            size,
-            vec![Event::Key {
-                key: Key::Comma,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: Modifiers::COMMAND,
-            }],
-        );
-        assert!(app.is_settings_open());
-
-        let center = Pos2::new(size.x * 0.5, size.y * 0.5);
-        let safe_click_bottom = size.y - 110.0;
-        let mut out = run_frames(&ctx, &mut app, size, Vec::new());
-        for _ in 0..14 {
-            let rects = collect_text_rects(&out);
-            if let (Some(_), Some(notif_r)) = (
-                find_text_rect(&rects, "Pada sesi Wayland"),
-                find_text_rect(&rects, "Tampilkan notifikasi sistem"),
-            ) {
-                if notif_r.bottom() <= safe_click_bottom {
-                    break;
-                }
-            }
-            out = run_frames(
+            let _ = run_frames(
                 &ctx,
                 &mut app,
                 size,
-                vec![
-                    Event::PointerMoved(center),
-                    Event::MouseWheel {
-                        unit: egui::MouseWheelUnit::Point,
-                        delta: Vec2::new(0.0, -120.0),
-                        modifiers: Modifiers::NONE,
-                    },
-                ],
+                vec![Event::Key {
+                    key: Key::Comma,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::COMMAND,
+                }],
+            );
+            assert!(app.is_settings_open());
+
+            let center = Pos2::new(size.x * 0.5, size.y * 0.5);
+            let safe_click_bottom = size.y - 110.0;
+            let mut out = run_frames(&ctx, &mut app, size, Vec::new());
+            for _ in 0..16 {
+                let rects = collect_text_rects(&out);
+                if let (Some(tray_r), Some(_), Some(notif_r)) = (
+                    find_text_rect(&rects, "Tetap berjalan di system tray saat jendela ditutup"),
+                    find_text_rect(&rects, "Menutup jendela tetap menghentikan aplikasi"),
+                    find_text_rect(&rects, "Tampilkan notifikasi sistem"),
+                ) {
+                    if tray_r.top() >= 100.0 && notif_r.bottom() <= safe_click_bottom {
+                        break;
+                    }
+                }
+                out = run_frames(
+                    &ctx,
+                    &mut app,
+                    size,
+                    vec![
+                        Event::PointerMoved(center),
+                        Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: Vec2::new(0.0, -100.0),
+                            modifiers: Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+
+            assert_no_horizontal_overflow(
+                &out,
+                size.x,
+                &format!("tray_unavailable_note_{theme:?}_{vp_name}"),
+            );
+            let rendered = collect_rendered_text(&out);
+            assert!(
+                rendered.contains("Wayland native")
+                    && rendered.contains("AppIndicator/StatusNotifier"),
+                "{vp_name} ({theme:?}) helper note should mention both Wayland native and AppIndicator/StatusNotifier"
+            );
+
+            let rects = collect_text_rects(&out);
+            let tray_rect =
+                find_text_rect(&rects, "Tetap berjalan di system tray saat jendela ditutup")
+                    .unwrap_or_else(|| panic!("{vp_name} ({theme:?}) missing tray switch"));
+            let helper_rect = find_text_rect(&rects, "Menutup jendela tetap menghentikan aplikasi")
+                .unwrap_or_else(|| panic!("{vp_name} ({theme:?}) missing tray helper note"));
+            let notif_rect = find_text_rect(&rects, "Tampilkan notifikasi sistem")
+                .unwrap_or_else(|| panic!("{vp_name} ({theme:?}) missing notif switch"));
+            assert!(!tray_rect.intersects(helper_rect));
+            assert!(!helper_rect.intersects(notif_rect));
+            assert!(!tray_rect.intersects(notif_rect));
+            assert!(helper_rect.top() >= tray_rect.bottom());
+            assert!(notif_rect.top() >= helper_rect.bottom());
+        }
+    }
+}
+
+#[test]
+fn settings_tray_helper_note_toggles_cleanly_across_tray_host_states_and_persists_pref() {
+    let viewports = [
+        ("narrow_680", Vec2::new(680.0, 540.0)),
+        ("medium_960", Vec2::new(960.0, 640.0)),
+        ("desktop_1280", Vec2::new(1280.0, 800.0)),
+    ];
+
+    for theme in [ThemePreference::Light, ThemePreference::Dark] {
+        for (vp_name, size) in viewports {
+            let ctx = egui::Context::default();
+            let mut prefs = configured_prefs(theme);
+            prefs.minimize_to_tray = false;
+            let mut app =
+                DesktopApp::new_headless(&ctx, prefs, Box::new(MemoryFallbackStore::new()));
+            app.set_hide_to_tray_supported_for_test(true);
+            app.set_test_snapshot(Some(sample_populated_snapshot()));
+
+            let _ = run_frames(
+                &ctx,
+                &mut app,
+                size,
+                vec![Event::Key {
+                    key: Key::Comma,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::COMMAND,
+                }],
+            );
+            assert!(app.is_settings_open());
+
+            let center = Pos2::new(size.x * 0.5, size.y * 0.5);
+            let safe_click_bottom = size.y - 110.0;
+            let mut supported_out = run_frames(&ctx, &mut app, size, Vec::new());
+            for _ in 0..16 {
+                let rects = collect_text_rects(&supported_out);
+                if let (Some(tray_r), Some(notif_r)) = (
+                    find_text_rect(&rects, "Tetap berjalan di system tray saat jendela ditutup"),
+                    find_text_rect(&rects, "Tampilkan notifikasi sistem"),
+                ) {
+                    if tray_r.top() >= 100.0 && notif_r.bottom() <= safe_click_bottom {
+                        break;
+                    }
+                }
+                supported_out = run_frames(
+                    &ctx,
+                    &mut app,
+                    size,
+                    vec![
+                        Event::PointerMoved(center),
+                        Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: Vec2::new(0.0, -100.0),
+                            modifiers: Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+
+            assert_no_horizontal_overflow(
+                &supported_out,
+                size.x,
+                &format!("tray_supported_{theme:?}_{vp_name}"),
+            );
+            let supported_text = collect_rendered_text(&supported_out);
+            assert!(
+                !supported_text.contains("Menutup jendela tetap menghentikan aplikasi"),
+                "{vp_name} ({theme:?}) must hide tray-unavailable note when hide_to_tray_supported=true"
+            );
+            let supported_rects = collect_text_rects(&supported_out);
+            let tray_rect = find_text_rect(
+                &supported_rects,
+                "Tetap berjalan di system tray saat jendela ditutup",
+            )
+            .unwrap_or_else(|| panic!("{vp_name} ({theme:?}) missing tray switch"));
+            let notif_rect = find_text_rect(&supported_rects, "Tampilkan notifikasi sistem")
+                .unwrap_or_else(|| panic!("{vp_name} ({theme:?}) missing notif switch"));
+            assert!(!tray_rect.intersects(notif_rect));
+            assert!(notif_rect.top() >= tray_rect.bottom());
+
+            // Simulate tray host disappearing (or native Wayland) while Settings is open.
+            app.set_hide_to_tray_supported_for_test(false);
+            let unavailable_out = run_frames(&ctx, &mut app, size, Vec::new());
+            assert_no_horizontal_overflow(
+                &unavailable_out,
+                size.x,
+                &format!("tray_live_lost_{theme:?}_{vp_name}"),
+            );
+            let unavailable_rects = collect_text_rects(&unavailable_out);
+            let tray_rect_unavail = find_text_rect(
+                &unavailable_rects,
+                "Tetap berjalan di system tray saat jendela ditutup",
+            )
+            .unwrap_or_else(|| panic!("{vp_name} ({theme:?}) missing tray switch after flip"));
+            let helper_rect = find_text_rect(
+                &unavailable_rects,
+                "Menutup jendela tetap menghentikan aplikasi",
+            )
+            .unwrap_or_else(|| panic!("{vp_name} ({theme:?}) missing helper note after flip"));
+            let notif_rect_unavail =
+                find_text_rect(&unavailable_rects, "Tampilkan notifikasi sistem").unwrap_or_else(
+                    || panic!("{vp_name} ({theme:?}) missing notif switch after flip"),
+                );
+            assert!(!tray_rect_unavail.intersects(helper_rect));
+            assert!(!helper_rect.intersects(notif_rect_unavail));
+            assert!(helper_rect.top() >= tray_rect_unavail.bottom());
+            assert!(notif_rect_unavail.top() >= helper_rect.bottom());
+
+            // Toggling and saving minimize_to_tray must still persist even when currently unsupported.
+            let toggled_out =
+                run_frames(&ctx, &mut app, size, click_at(tray_rect_unavail.center()));
+            let save_rect = find_text_rect(&collect_text_rects(&toggled_out), "Simpan Pengaturan")
+                .expect("expected Simpan Pengaturan button");
+            let _ = run_frames(&ctx, &mut app, size, click_at(save_rect.center()));
+            assert!(!app.is_settings_open());
+            assert!(
+                app.prefs().minimize_to_tray,
+                "{vp_name} ({theme:?}) minimize_to_tray should persist when saved"
+            );
+
+            // Re-open Settings and simulate tray host returning while open.
+            let _ = run_frames(
+                &ctx,
+                &mut app,
+                size,
+                vec![Event::Key {
+                    key: Key::Comma,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::COMMAND,
+                }],
+            );
+            assert!(app.is_settings_open());
+            app.set_hide_to_tray_supported_for_test(true);
+            let restored_out = run_frames(&ctx, &mut app, size, Vec::new());
+            assert_no_horizontal_overflow(
+                &restored_out,
+                size.x,
+                &format!("tray_live_restored_{theme:?}_{vp_name}"),
+            );
+            let restored_text = collect_rendered_text(&restored_out);
+            assert!(
+                !restored_text.contains("Menutup jendela tetap menghentikan aplikasi"),
+                "{vp_name} ({theme:?}) helper note must hide again when tray host recovers"
             );
         }
-
-        assert_no_horizontal_overflow(&out, size.x, &format!("wayland_note_{vp_name}"));
-        let rects = collect_text_rects(&out);
-        let tray_rect =
-            find_text_rect(&rects, "Tetap berjalan di system tray saat jendela ditutup")
-                .unwrap_or_else(|| panic!("{vp_name} missing tray switch"));
-        let wayland_rect = find_text_rect(&rects, "Pada sesi Wayland")
-            .unwrap_or_else(|| panic!("{vp_name} missing Wayland helper note"));
-        let notif_rect = find_text_rect(&rects, "Tampilkan notifikasi sistem")
-            .unwrap_or_else(|| panic!("{vp_name} missing notif switch"));
-        assert!(!tray_rect.intersects(wayland_rect));
-        assert!(!wayland_rect.intersects(notif_rect));
-        assert!(wayland_rect.top() >= tray_rect.bottom());
-        assert!(notif_rect.top() >= wayland_rect.bottom());
     }
 }
 
@@ -2131,4 +2297,915 @@ fn minecraft_toast_preview_composite_renders_all_three_kinds_cleanly() {
     if let Ok(out_path) = std::env::var("POLBAN_EXPORT_TOAST_PREVIEW") {
         std::fs::write(&out_path, &png).expect("failed to write Minecraft toast preview PNG");
     }
+}
+
+#[test]
+fn linux_window_titlebar_renders_flush_top_right_without_overlap_across_viewports_and_presets() {
+    use absen_gui::theme::ThemeTokens;
+    use absen_gui::ui::titlebar::{close_hover_bg, CONTROL_BUTTON_WIDTH, TITLEBAR_HEIGHT};
+
+    let viewports = [
+        ("min_640x520", Vec2::new(640.0, 520.0)),
+        ("narrow_820x680", Vec2::new(820.0, 680.0)),
+        ("default_1040x680", Vec2::new(1040.0, 680.0)),
+        ("wide_1440x860", Vec2::new(1440.0, 860.0)),
+    ];
+
+    let sample_presets = [
+        (
+            ThemePreference::Light,
+            LightThemePreset::DefaultLight,
+            DarkThemePreset::DefaultDark,
+        ),
+        (
+            ThemePreference::Light,
+            LightThemePreset::SolarizedLight,
+            DarkThemePreset::DefaultDark,
+        ),
+        (
+            ThemePreference::Dark,
+            LightThemePreset::DefaultLight,
+            DarkThemePreset::DefaultDark,
+        ),
+        (
+            ThemePreference::Dark,
+            LightThemePreset::DefaultLight,
+            DarkThemePreset::Vesper,
+        ),
+    ];
+
+    for (theme, light_preset, dark_preset) in sample_presets {
+        let expected_palette = ThemeTokens::resolve_appearance(
+            absen_gui::theme::AppearanceConfig {
+                mode: theme,
+                light_preset,
+                dark_preset,
+            },
+            false,
+        );
+        for (vp_name, size) in viewports {
+            let ctx = egui::Context::default();
+            let mut prefs = configured_prefs(theme);
+            prefs.light_preset = light_preset;
+            prefs.dark_preset = dark_preset;
+            let mut app =
+                DesktopApp::new_headless(&ctx, prefs, Box::new(MemoryFallbackStore::new()));
+            app.set_show_window_controls_for_test(true);
+            app.set_test_snapshot(Some(sample_populated_snapshot()));
+
+            let out = run_frames(&ctx, &mut app, size, Vec::new());
+            assert_no_horizontal_overflow(&out, size.x, &format!("titlebar_{vp_name}_{theme:?}"));
+
+            // Titlebar brand label sits inside top 32px, while CentralPanel header starts at >= 32px.
+            let text_rects = collect_text_rects(&out);
+            let brand_rects: Vec<Rect> = text_rects
+                .iter()
+                .filter(|(t, _)| t == "Polban Presensi")
+                .map(|(_, r)| *r)
+                .collect();
+            assert_eq!(
+                brand_rects.len(),
+                2,
+                "{vp_name}: expected titlebar label and main header title"
+            );
+            let top_label = brand_rects
+                .iter()
+                .min_by(|a, b| a.top().total_cmp(&b.top()))
+                .copied()
+                .unwrap();
+            let main_header = brand_rects
+                .iter()
+                .max_by(|a, b| a.top().total_cmp(&b.top()))
+                .copied()
+                .unwrap();
+            assert!(
+                top_label.top() >= 0.0 && top_label.bottom() <= TITLEBAR_HEIGHT,
+                "{vp_name}: titlebar label {top_label:?} outside 32px bar"
+            );
+            assert!(
+                main_header.top() >= TITLEBAR_HEIGHT,
+                "{vp_name}: main header {main_header:?} overlapped 32px titlebar"
+            );
+
+            // Hover each of the 3 top-right buttons and verify exact flush 42x32 rects and fills.
+            let min_center = Pos2::new(size.x - CONTROL_BUTTON_WIDTH * 2.5, 16.0);
+            let max_center = Pos2::new(size.x - CONTROL_BUTTON_WIDTH * 1.5, 16.0);
+            let close_center = Pos2::new(size.x - CONTROL_BUTTON_WIDTH * 0.5, 16.0);
+
+            let hover_min = run_frames(&ctx, &mut app, size, vec![Event::PointerMoved(min_center)]);
+            let mut min_shapes = Vec::new();
+            for c in &hover_min.shapes {
+                collect_rect_shapes(&c.shape, &mut min_shapes);
+            }
+            assert!(
+                min_shapes.iter().any(|(r, fill)| {
+                    *fill == expected_palette.bg_subtle
+                        && (r.left() - (size.x - CONTROL_BUTTON_WIDTH * 3.0)).abs() < 1.0
+                        && (r.right() - (size.x - CONTROL_BUTTON_WIDTH * 2.0)).abs() < 1.0
+                        && r.top().abs() < 1.0
+                        && (r.height() - TITLEBAR_HEIGHT).abs() < 1.0
+                }),
+                "{vp_name}: Minimize hover rect not flush 42x32 at expected position"
+            );
+
+            let hover_max = run_frames(&ctx, &mut app, size, vec![Event::PointerMoved(max_center)]);
+            let mut max_shapes = Vec::new();
+            for c in &hover_max.shapes {
+                collect_rect_shapes(&c.shape, &mut max_shapes);
+            }
+            assert!(
+                max_shapes.iter().any(|(r, fill)| {
+                    *fill == expected_palette.bg_subtle
+                        && (r.left() - (size.x - CONTROL_BUTTON_WIDTH * 2.0)).abs() < 1.0
+                        && (r.right() - (size.x - CONTROL_BUTTON_WIDTH)).abs() < 1.0
+                        && r.top().abs() < 1.0
+                        && (r.height() - TITLEBAR_HEIGHT).abs() < 1.0
+                }),
+                "{vp_name}: Maximize hover rect not flush 42x32 at expected position"
+            );
+
+            let hover_close = run_frames(
+                &ctx,
+                &mut app,
+                size,
+                vec![Event::PointerMoved(close_center)],
+            );
+            let mut close_shapes = Vec::new();
+            for c in &hover_close.shapes {
+                collect_rect_shapes(&c.shape, &mut close_shapes);
+            }
+            assert!(
+                close_shapes.iter().any(|(r, fill)| {
+                    *fill == close_hover_bg(expected_palette)
+                        && (r.left() - (size.x - CONTROL_BUTTON_WIDTH)).abs() < 1.0
+                        && (r.right() - size.x).abs() < 1.0
+                        && r.top().abs() < 1.0
+                        && (r.height() - TITLEBAR_HEIGHT).abs() < 1.0
+                }),
+                "{vp_name}: Close hover rect not flush 42x32 at top-right edge"
+            );
+
+            // Opening Settings modal with titlebar enabled must stay overlap-free and dismiss on backdrop click.
+            let modal_out = run_frames(
+                &ctx,
+                &mut app,
+                size,
+                vec![Event::Key {
+                    key: Key::Comma,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::COMMAND,
+                }],
+            );
+            assert!(app.is_settings_open());
+            assert_no_horizontal_overflow(&modal_out, size.x, &format!("titlebar_modal_{vp_name}"));
+            let _ = run_frames(&ctx, &mut app, size, click_at(Pos2::new(6.0, 6.0)));
+            assert!(
+                !app.is_settings_open(),
+                "{vp_name}: backdrop click at (6, 6) should dismiss Settings even with titlebar"
+            );
+        }
+    }
+
+    // Verify all 19 Light & Dark presets render cleanly with show_window_controls = true.
+    let default_size = Vec2::new(1040.0, 680.0);
+    for light_preset in LightThemePreset::ALL {
+        let ctx = egui::Context::default();
+        let mut prefs = configured_prefs(ThemePreference::Light);
+        prefs.light_preset = light_preset;
+        let mut app = DesktopApp::new_headless(&ctx, prefs, Box::new(MemoryFallbackStore::new()));
+        app.set_show_window_controls_for_test(true);
+        app.set_test_snapshot(Some(sample_populated_snapshot()));
+        let out = run_frames(&ctx, &mut app, default_size, Vec::new());
+        assert_no_horizontal_overflow(&out, default_size.x, light_preset.label());
+    }
+    for dark_preset in DarkThemePreset::ALL {
+        let ctx = egui::Context::default();
+        let mut prefs = configured_prefs(ThemePreference::Dark);
+        prefs.dark_preset = dark_preset;
+        let mut app = DesktopApp::new_headless(&ctx, prefs, Box::new(MemoryFallbackStore::new()));
+        app.set_show_window_controls_for_test(true);
+        app.set_test_snapshot(Some(sample_populated_snapshot()));
+        let out = run_frames(&ctx, &mut app, default_size, Vec::new());
+        assert_no_horizontal_overflow(&out, default_size.x, dark_preset.label());
+    }
+}
+
+#[test]
+fn linux_window_titlebar_pointer_clicks_drag_and_double_click_emit_expected_commands() {
+    use absen_gui::ui::titlebar::CONTROL_BUTTON_WIDTH;
+
+    let size = Vec2::new(1040.0, 680.0);
+    let make_raw = |time: f64, maximized: bool, events: Vec<Event>| {
+        let mut raw = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+            time: Some(time),
+            events,
+            ..Default::default()
+        };
+        raw.viewports.insert(
+            egui::ViewportId::ROOT,
+            egui::ViewportInfo {
+                maximized: Some(maximized),
+                ..Default::default()
+            },
+        );
+        raw
+    };
+
+    let ctx = egui::Context::default();
+    let mut app = DesktopApp::new_headless(
+        &ctx,
+        AppPrefs {
+            nim: "251511025".to_string(),
+            minimize_to_tray: true,
+            notifications_enabled: true,
+            ..AppPrefs::default()
+        },
+        Box::new(MemoryFallbackStore::new()),
+    );
+    let (notifier, log) = absen_gui::platform::Notifier::new_recorded(true);
+    app.set_notifier_for_test(notifier);
+    app.set_headless_tray_active_for_test(true);
+    app.set_hide_to_tray_supported_for_test(true);
+    app.set_show_window_controls_for_test(true);
+    app.set_test_snapshot(Some(sample_populated_snapshot()));
+
+    // Initial layout pass.
+    let _ = ctx.run(make_raw(0.0, false, Vec::new()), |c| app.update_ui(c));
+
+    // 1. Click Minimize button -> Minimized(true).
+    let min_pos = Pos2::new(size.x - CONTROL_BUTTON_WIDTH * 2.5, 16.0);
+    let min_out = ctx.run(make_raw(0.1, false, click_at(min_pos)), |c| {
+        app.update_ui(c)
+    });
+    assert!(min_out.viewport_output[&egui::ViewportId::ROOT]
+        .commands
+        .iter()
+        .any(|c| matches!(c, egui::ViewportCommand::Minimized(true))));
+
+    // 2. Click Maximize when unmaximized -> Maximized(true).
+    let max_pos = Pos2::new(size.x - CONTROL_BUTTON_WIDTH * 1.5, 16.0);
+    let max_out = ctx.run(make_raw(0.2, false, click_at(max_pos)), |c| {
+        app.update_ui(c)
+    });
+    assert!(max_out.viewport_output[&egui::ViewportId::ROOT]
+        .commands
+        .iter()
+        .any(|c| matches!(c, egui::ViewportCommand::Maximized(true))));
+
+    // 3. Click Restore when maximized -> Maximized(false).
+    let restore_out = ctx.run(make_raw(0.8, true, click_at(max_pos)), |c| app.update_ui(c));
+    assert!(restore_out.viewport_output[&egui::ViewportId::ROOT]
+        .commands
+        .iter()
+        .any(|c| matches!(c, egui::ViewportCommand::Maximized(false))));
+
+    // 4. Drag on titlebar bar -> StartDrag.
+    let drag_start = Pos2::new(260.0, 16.0);
+    let drag_end = Pos2::new(290.0, 16.0);
+    let _ = ctx.run(
+        make_raw(
+            1.4,
+            false,
+            vec![
+                Event::PointerMoved(drag_start),
+                Event::PointerButton {
+                    pos: drag_start,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Modifiers::NONE,
+                },
+            ],
+        ),
+        |c| app.update_ui(c),
+    );
+    let drag_out = ctx.run(
+        make_raw(1.45, false, vec![Event::PointerMoved(drag_end)]),
+        |c| app.update_ui(c),
+    );
+    assert!(drag_out.viewport_output[&egui::ViewportId::ROOT]
+        .commands
+        .iter()
+        .any(|c| matches!(c, egui::ViewportCommand::StartDrag)));
+    let _ = ctx.run(
+        make_raw(
+            1.5,
+            false,
+            vec![Event::PointerButton {
+                pos: drag_end,
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            }],
+        ),
+        |c| app.update_ui(c),
+    );
+
+    // 5. Double-click on drag bar -> Maximized(true).
+    let dbl_pos = Pos2::new(320.0, 16.0);
+    let _ = ctx.run(make_raw(2.2, false, click_at(dbl_pos)), |c| {
+        app.update_ui(c)
+    });
+    let dbl_out = ctx.run(make_raw(2.28, false, click_at(dbl_pos)), |c| {
+        app.update_ui(c)
+    });
+    assert!(dbl_out.viewport_output[&egui::ViewportId::ROOT]
+        .commands
+        .iter()
+        .any(|c| matches!(c, egui::ViewportCommand::Maximized(true))));
+
+    // 6. Click Close button with minimize_to_tray=true & tray active -> Visible(false) + tray notification.
+    let close_pos = Pos2::new(size.x - CONTROL_BUTTON_WIDTH * 0.5, 16.0);
+    let close_hide_out = ctx.run(make_raw(3.0, false, click_at(close_pos)), |c| {
+        app.update_ui(c)
+    });
+    let close_hide_cmds = &close_hide_out.viewport_output[&egui::ViewportId::ROOT].commands;
+    assert!(close_hide_cmds
+        .iter()
+        .any(|c| matches!(c, egui::ViewportCommand::Visible(false))));
+    assert!(!close_hide_cmds
+        .iter()
+        .any(|c| matches!(c, egui::ViewportCommand::Close)));
+    assert!(!app.controller().is_window_visible());
+    assert_eq!(log.lock().unwrap().len(), 1);
+
+    // 7. Click Close button when tray hide is unsupported -> ViewportCommand::Close.
+    app.set_hide_to_tray_supported_for_test(false);
+    let close_quit_out = ctx.run(make_raw(3.6, false, click_at(close_pos)), |c| {
+        app.update_ui(c)
+    });
+    assert!(close_quit_out.viewport_output[&egui::ViewportId::ROOT]
+        .commands
+        .iter()
+        .any(|c| matches!(c, egui::ViewportCommand::Close)));
+}
+
+fn find_rect_near_y(rects: &[(String, Rect)], exact: &str, target_y: f32) -> Option<Rect> {
+    rects
+        .iter()
+        .filter(|(text, r)| text == exact && (r.center().y - target_y).abs() <= 14.0)
+        .map(|(_, r)| *r)
+        .next()
+}
+
+fn scroll_settings_until(
+    ctx: &egui::Context,
+    app: &mut DesktopApp,
+    size: Vec2,
+    max_steps: usize,
+    delta_y: f32,
+    mut pred: impl FnMut(&[(String, Rect)]) -> bool,
+) -> egui::FullOutput {
+    let center = Pos2::new(size.x * 0.5, size.y * 0.5);
+    let mut out = run_frames(ctx, app, size, Vec::new());
+    for _ in 0..max_steps {
+        let rects = collect_text_rects(&out);
+        if pred(&rects) {
+            return out;
+        }
+        out = run_frames(
+            ctx,
+            app,
+            size,
+            vec![
+                Event::PointerMoved(center),
+                Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: Vec2::new(0.0, delta_y),
+                    modifiers: Modifiers::NONE,
+                },
+            ],
+        );
+    }
+    out
+}
+
+#[test]
+fn settings_zoom_and_volume_sliders_render_without_overlap_across_viewports_and_themes() {
+    let viewports = [
+        ("min_640x520", Vec2::new(640.0, 520.0)),
+        ("zoomed_640x520_150pct", Vec2::new(640.0 / 1.5, 520.0 / 1.5)),
+        ("narrow_820x680", Vec2::new(820.0, 680.0)),
+        ("default_1040x680", Vec2::new(1040.0, 680.0)),
+        ("wide_1440x860", Vec2::new(1440.0, 860.0)),
+    ];
+
+    let presets = [
+        (
+            ThemePreference::Light,
+            LightThemePreset::DefaultLight,
+            DarkThemePreset::DefaultDark,
+        ),
+        (
+            ThemePreference::Light,
+            LightThemePreset::SolarizedLight,
+            DarkThemePreset::DefaultDark,
+        ),
+        (
+            ThemePreference::Dark,
+            LightThemePreset::DefaultLight,
+            DarkThemePreset::DefaultDark,
+        ),
+        (
+            ThemePreference::Dark,
+            LightThemePreset::DefaultLight,
+            DarkThemePreset::Everforest,
+        ),
+        (
+            ThemePreference::Dark,
+            LightThemePreset::DefaultLight,
+            DarkThemePreset::Vesper,
+        ),
+    ];
+
+    let expected_hint_key = if cfg!(target_os = "macos") {
+        "Cmd + / Cmd -"
+    } else {
+        "Ctrl + / Ctrl -"
+    };
+    let expected_reset_key = if cfg!(target_os = "macos") {
+        "Cmd + 0"
+    } else {
+        "Ctrl + 0"
+    };
+
+    for (theme, light_preset, dark_preset) in presets {
+        for (vp_name, size) in viewports {
+            let ctx = egui::Context::default();
+            let mut prefs = configured_prefs(theme);
+            prefs.light_preset = light_preset;
+            prefs.dark_preset = dark_preset;
+            let mut app =
+                DesktopApp::new_headless(&ctx, prefs, Box::new(MemoryFallbackStore::new()));
+            app.set_test_snapshot(Some(sample_populated_snapshot()));
+
+            let _ = run_frames(
+                &ctx,
+                &mut app,
+                size,
+                vec![Event::Key {
+                    key: Key::Comma,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::COMMAND,
+                }],
+            );
+            assert!(app.is_settings_open());
+
+            let modal_h = (size.y - 48.0).clamp(280.0, 680.0);
+            let safe_top = (size.y - modal_h) * 0.5 + 76.0;
+            let safe_bottom = (size.y + modal_h) * 0.5 - 74.0;
+
+            // 1. Scroll to Zoom In/Out card and verify layout & zero overlap.
+            let zoom_out = scroll_settings_until(&ctx, &mut app, size, 24, -70.0, |rects| {
+                let Some(title) = find_text_rect(rects, "Skala Tampilan (Zoom)") else {
+                    return false;
+                };
+                let Some(hint) = find_text_rect(rects, expected_hint_key) else {
+                    return false;
+                };
+                title.top() >= safe_top && hint.bottom() <= safe_bottom
+            });
+            assert_no_horizontal_overflow(
+                &zoom_out,
+                size.x,
+                &format!("zoom_card_{vp_name}_{theme:?}"),
+            );
+
+            let z_text = collect_rendered_text(&zoom_out);
+            assert!(z_text.contains("Skala Tampilan (Zoom)"));
+            assert!(z_text.contains(expected_hint_key));
+            assert!(z_text.contains(expected_reset_key));
+            assert!(z_text.contains("70%"));
+            assert!(z_text.contains("150%"));
+
+            let z_rects = collect_text_rects(&zoom_out);
+            let z_title = find_text_rect(&z_rects, "Skala Tampilan (Zoom)")
+                .unwrap_or_else(|| panic!("{vp_name} missing zoom card title"));
+            let z_reset = find_exact_text_rect(&z_rects, "Reset")
+                .unwrap_or_else(|| panic!("{vp_name} missing zoom Reset button"));
+            let z_badge = find_rect_near_y(&z_rects, "100%", z_title.center().y)
+                .unwrap_or_else(|| panic!("{vp_name} missing zoom 100% badge"));
+            let z_min = find_exact_text_rect(&z_rects, "70%")
+                .unwrap_or_else(|| panic!("{vp_name} missing zoom 70% label"));
+            let z_max = find_exact_text_rect(&z_rects, "150%")
+                .unwrap_or_else(|| panic!("{vp_name} missing zoom 150% label"));
+            let z_hint = find_text_rect(&z_rects, expected_hint_key)
+                .unwrap_or_else(|| panic!("{vp_name} missing zoom shortcut hint"));
+
+            assert!(!z_title.intersects(z_badge));
+            assert!(!z_title.intersects(z_reset));
+            assert!(!z_badge.intersects(z_reset));
+            assert!(!z_min.intersects(z_max));
+            assert!(z_min.top() >= z_title.bottom());
+            assert!(z_hint.top() >= z_min.bottom());
+
+            // 2. Scroll to Notification Volume row inside Integrasi Desktop and verify zero overlap.
+            let vol_out = scroll_settings_until(&ctx, &mut app, size, 24, -60.0, |rects| {
+                let Some(sound_r) = find_text_rect(rects, "Putar suara notifikasi") else {
+                    return false;
+                };
+                let Some(vol_r) = find_text_rect(rects, "Volume suara notifikasi") else {
+                    return false;
+                };
+                let Some(v0) = find_exact_text_rect(rects, "0%") else {
+                    return false;
+                };
+                sound_r.top() >= safe_top
+                    && vol_r.top() > sound_r.bottom()
+                    && v0.bottom() <= safe_bottom
+            });
+            assert_no_horizontal_overflow(
+                &vol_out,
+                size.x,
+                &format!("volume_row_{vp_name}_{theme:?}"),
+            );
+
+            let v_rects = collect_text_rects(&vol_out);
+            let sound_r = find_text_rect(&v_rects, "Putar suara notifikasi")
+                .unwrap_or_else(|| panic!("{vp_name} missing sound switch"));
+            let vol_r = find_text_rect(&v_rects, "Volume suara notifikasi")
+                .unwrap_or_else(|| panic!("{vp_name} missing volume label"));
+            let vol_badge = find_rect_near_y(&v_rects, "100%", vol_r.center().y)
+                .unwrap_or_else(|| panic!("{vp_name} missing volume 100% readout"));
+            let v0 = find_exact_text_rect(&v_rects, "0%")
+                .unwrap_or_else(|| panic!("{vp_name} missing volume 0% label"));
+            let v100 = find_rect_near_y(&v_rects, "100%", v0.center().y)
+                .unwrap_or_else(|| panic!("{vp_name} missing volume 100% end label"));
+
+            assert!(!vol_r.intersects(vol_badge));
+            assert!(!v0.intersects(v100));
+            assert!(vol_r.top() > sound_r.bottom());
+            assert!(v0.top() >= vol_r.bottom());
+
+            // Verify autostart row sits cleanly below the volume slider row.
+            let after_vol_out = scroll_settings_until(&ctx, &mut app, size, 12, -60.0, |rects| {
+                let Some(v0_r) = find_exact_text_rect(rects, "0%") else {
+                    return false;
+                };
+                let Some(auto_r) =
+                    find_text_rect(rects, "Jalankan otomatis saat login sistem operasi")
+                else {
+                    return false;
+                };
+                v0_r.top() >= safe_top && auto_r.bottom() <= safe_bottom
+            });
+            let av_rects = collect_text_rects(&after_vol_out);
+            let v0_after = find_exact_text_rect(&av_rects, "0%")
+                .unwrap_or_else(|| panic!("{vp_name} missing volume 0% above autostart"));
+            let auto_r = find_text_rect(&av_rects, "Jalankan otomatis saat login sistem operasi")
+                .unwrap_or_else(|| panic!("{vp_name} missing autostart switch"));
+            assert!(!v0_after.intersects(auto_r));
+            assert!(auto_r.top() > v0_after.bottom());
+        }
+    }
+}
+
+#[test]
+fn settings_zoom_slider_live_preview_reset_cancel_revert_and_save_persistence() {
+    let size = Vec2::new(1040.0, 680.0);
+    let ctx = egui::Context::default();
+    let mut app = DesktopApp::new_headless(
+        &ctx,
+        configured_prefs(ThemePreference::Light),
+        Box::new(MemoryFallbackStore::new()),
+    );
+    app.set_test_snapshot(Some(sample_populated_snapshot()));
+
+    // Open Settings via Ctrl+,
+    let _ = run_frames(
+        &ctx,
+        &mut app,
+        size,
+        vec![Event::Key {
+            key: Key::Comma,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::COMMAND,
+        }],
+    );
+    assert!(app.is_settings_open());
+
+    let safe_bottom = size.y - 100.0;
+    let zoom_out = scroll_settings_until(&ctx, &mut app, size, 16, -120.0, |rects| {
+        let Some(title) = find_text_rect(rects, "Skala Tampilan (Zoom)") else {
+            return false;
+        };
+        let Some(r150) = find_exact_text_rect(rects, "150%") else {
+            return false;
+        };
+        title.top() >= 90.0 && r150.bottom() <= safe_bottom
+    });
+
+    let z_rects = collect_text_rects(&zoom_out);
+    let r_70 = find_exact_text_rect(&z_rects, "70%").expect("expected 70% label");
+    let r_150 = find_exact_text_rect(&z_rects, "150%").expect("expected 150% label");
+    let track_right_x = r_150.left() - 18.0;
+    let track_y = r_70.center().y;
+
+    // 1. Click near right end of zoom slider -> live preview jumps to 150% without saving.
+    let _ = run_frames(
+        &ctx,
+        &mut app,
+        size,
+        click_at(Pos2::new(track_right_x, track_y)),
+    );
+    assert_eq!(app.settings_ui_zoom_pct_for_test(), 150);
+    assert!(
+        (ctx.zoom_factor() - 1.50).abs() < 1e-5,
+        "expected live zoom_factor 1.50, got {}",
+        ctx.zoom_factor()
+    );
+    assert_eq!(app.prefs().ui_zoom_pct, 100, "prefs unchanged before Save");
+
+    // On zoomed viewport, ensure Zoom card is scrolled into view and displays 150% + Reset.
+    let preview_out = scroll_settings_until(&ctx, &mut app, size, 12, -90.0, |rects| {
+        find_text_rect(rects, "Skala Tampilan (Zoom)").is_some()
+            && find_exact_text_rect(rects, "Reset").is_some()
+    });
+    assert!(collect_rendered_text(&preview_out).contains("150%"));
+
+    // 2. Click "Reset" button -> immediately resets live zoom back to 100%.
+    let reset_rect = find_exact_text_rect(&collect_text_rects(&preview_out), "Reset")
+        .expect("expected Reset button");
+    let _ = run_frames(&ctx, &mut app, size, click_at(reset_rect.center()));
+    assert_eq!(app.settings_ui_zoom_pct_for_test(), 100);
+    assert!((ctx.zoom_factor() - 1.00).abs() < 1e-5);
+
+    // 3. Re-click slider right end to preview 150%, then click "Batal" -> reverts to 100%.
+    let zoom_out2 = scroll_settings_until(&ctx, &mut app, size, 12, -90.0, |rects| {
+        let Some(title) = find_text_rect(rects, "Skala Tampilan (Zoom)") else {
+            return false;
+        };
+        let Some(r150) = find_exact_text_rect(rects, "150%") else {
+            return false;
+        };
+        title.top() >= 90.0 && r150.bottom() <= safe_bottom
+    });
+    let z_rects2 = collect_text_rects(&zoom_out2);
+    let r_70_2 = find_exact_text_rect(&z_rects2, "70%").expect("expected 70% label");
+    let r_150_2 = find_exact_text_rect(&z_rects2, "150%").expect("expected 150% label");
+    let preview2_out = run_frames(
+        &ctx,
+        &mut app,
+        size,
+        click_at(Pos2::new(r_150_2.left() - 18.0, r_70_2.center().y)),
+    );
+    assert_eq!(app.settings_ui_zoom_pct_for_test(), 150);
+    assert!((ctx.zoom_factor() - 1.50).abs() < 1e-5);
+
+    let cancel_rect = find_exact_text_rect(&collect_text_rects(&preview2_out), "Batal")
+        .expect("expected Batal button");
+    let _ = run_frames(&ctx, &mut app, size, click_at(cancel_rect.center()));
+    assert!(!app.is_settings_open());
+    assert_eq!(app.prefs().ui_zoom_pct, 100);
+    assert!((ctx.zoom_factor() - 1.00).abs() < 1e-5);
+
+    // 4. Reopen Settings, click left end (70%), click "Simpan Pengaturan" -> persists 70%.
+    let _ = run_frames(
+        &ctx,
+        &mut app,
+        size,
+        vec![Event::Key {
+            key: Key::Comma,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::COMMAND,
+        }],
+    );
+    let zoom_reopened = scroll_settings_until(&ctx, &mut app, size, 16, -120.0, |rects| {
+        let Some(title) = find_text_rect(rects, "Skala Tampilan (Zoom)") else {
+            return false;
+        };
+        let Some(r70) = find_exact_text_rect(rects, "70%") else {
+            return false;
+        };
+        title.top() >= 90.0 && r70.bottom() <= safe_bottom
+    });
+    let r70_3 =
+        find_exact_text_rect(&collect_text_rects(&zoom_reopened), "70%").expect("expected 70%");
+    let saved_preview = run_frames(
+        &ctx,
+        &mut app,
+        size,
+        click_at(Pos2::new(r70_3.right() + 18.0, r70_3.center().y)),
+    );
+    assert_eq!(app.settings_ui_zoom_pct_for_test(), 70);
+
+    let save_rect = find_text_rect(&collect_text_rects(&saved_preview), "Simpan Pengaturan")
+        .expect("expected Simpan Pengaturan button");
+    let _ = run_frames(&ctx, &mut app, size, click_at(save_rect.center()));
+    assert!(!app.is_settings_open());
+    assert_eq!(app.prefs().ui_zoom_pct, 70);
+    assert!((ctx.zoom_factor() - 0.70).abs() < 1e-5);
+}
+
+#[test]
+fn settings_volume_slider_wires_to_test_notification_disables_when_sound_off_and_persists() {
+    let size = Vec2::new(1040.0, 680.0);
+    let ctx = egui::Context::default();
+    let mut app = DesktopApp::new_headless(
+        &ctx,
+        configured_prefs(ThemePreference::Dark),
+        Box::new(MemoryFallbackStore::new()),
+    );
+    let (recorded, log) = absen_gui::platform::Notifier::new_recorded(true);
+    app.set_notifier_for_test(recorded);
+    app.set_test_snapshot(Some(sample_populated_snapshot()));
+
+    // Open Settings via Ctrl+,
+    let _ = run_frames(
+        &ctx,
+        &mut app,
+        size,
+        vec![Event::Key {
+            key: Key::Comma,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::COMMAND,
+        }],
+    );
+    assert!(app.is_settings_open());
+
+    let safe_bottom = size.y - 100.0;
+    let vol_out = scroll_settings_until(&ctx, &mut app, size, 18, -110.0, |rects| {
+        let Some(sound_r) = find_text_rect(rects, "Putar suara notifikasi") else {
+            return false;
+        };
+        let Some(v0) = find_exact_text_rect(rects, "0%") else {
+            return false;
+        };
+        let Some(test_btn) = find_text_rect(rects, "Uji Notifikasi") else {
+            return false;
+        };
+        sound_r.top() >= 90.0 && v0.bottom() <= safe_bottom && test_btn.bottom() <= safe_bottom
+    });
+
+    let v_rects = collect_text_rects(&vol_out);
+    let r_0 = find_exact_text_rect(&v_rects, "0%").expect("expected 0% label");
+    let track_left_x = r_0.right() + 18.0;
+    let track_y = r_0.center().y;
+
+    // 1. Click left end (0%) -> displays "Bisu (0%)" and wires 0 into Uji Notifikasi.
+    let muted_out = run_frames(
+        &ctx,
+        &mut app,
+        size,
+        click_at(Pos2::new(track_left_x, track_y)),
+    );
+    assert_eq!(app.settings_notification_volume_for_test(), 0);
+    assert!(collect_rendered_text(&muted_out).contains("Bisu (0%)"));
+
+    let test_btn = find_text_rect(&collect_text_rects(&muted_out), "Uji Notifikasi")
+        .expect("expected Uji Notifikasi");
+    let after_test_out = run_frames(&ctx, &mut app, size, click_at(test_btn.center()));
+    assert_eq!(app.notifier_sound_volume_for_test(), 0);
+    assert_eq!(log.lock().unwrap().len(), 1);
+
+    // Re-read track coordinates from current frame before clicking midpoint.
+    let v_rects_mid = collect_text_rects(&after_test_out);
+    let r_0_mid = find_exact_text_rect(&v_rects_mid, "0%").expect("expected 0% label");
+    let r_100_mid =
+        find_rect_near_y(&v_rects_mid, "100%", r_0_mid.center().y).expect("expected 100% label");
+    let mid_x = ((r_0_mid.right() + 18.0) + (r_100_mid.left() - 18.0)) * 0.5;
+    let mid_y = r_0_mid.center().y;
+
+    // 2. Click midpoint (~50%) -> clicking Uji Notifikasi immediately applies ~50 to notifier.
+    let mid_out = run_frames(&ctx, &mut app, size, click_at(Pos2::new(mid_x, mid_y)));
+    let mid_vol = app.settings_notification_volume_for_test();
+    assert!(
+        (45..=55).contains(&mid_vol),
+        "expected ~50% midpoint volume, got {mid_vol}"
+    );
+    let test_btn2 = find_text_rect(&collect_text_rects(&mid_out), "Uji Notifikasi")
+        .expect("expected Uji Notifikasi");
+    let after_test2_out = run_frames(&ctx, &mut app, size, click_at(test_btn2.center()));
+    assert_eq!(app.notifier_sound_volume_for_test(), mid_vol);
+    assert_eq!(log.lock().unwrap().len(), 2);
+
+    // 3. Toggle "Putar suara notifikasi" off -> slider is disabled and clicks do not change volume.
+    let sound_switch = find_text_rect(
+        &collect_text_rects(&after_test2_out),
+        "Putar suara notifikasi",
+    )
+    .expect("expected Putar suara notifikasi");
+    let disabled_out = run_frames(&ctx, &mut app, size, click_at(sound_switch.center()));
+    let disabled_r0 =
+        find_exact_text_rect(&collect_text_rects(&disabled_out), "0%").expect("expected 0% label");
+    let _ = run_frames(
+        &ctx,
+        &mut app,
+        size,
+        click_at(Pos2::new(
+            disabled_r0.right() + 18.0,
+            disabled_r0.center().y,
+        )),
+    );
+    assert_eq!(
+        app.settings_notification_volume_for_test(),
+        mid_vol,
+        "volume slider must ignore clicks when notification_sound is disabled"
+    );
+
+    // Toggle sound back on, save, and confirm volume persisted cleanly.
+    let sound_switch2 = find_text_rect(
+        &collect_text_rects(&run_frames(&ctx, &mut app, size, Vec::new())),
+        "Putar suara notifikasi",
+    )
+    .expect("expected Putar suara notifikasi");
+    let after_re_enable = run_frames(&ctx, &mut app, size, click_at(sound_switch2.center()));
+    let save_rect = find_text_rect(&collect_text_rects(&after_re_enable), "Simpan Pengaturan")
+        .expect("expected Simpan Pengaturan");
+    let _ = run_frames(&ctx, &mut app, size, click_at(save_rect.center()));
+    assert!(!app.is_settings_open());
+    assert!(app.prefs().notification_sound);
+    assert_eq!(app.prefs().notification_volume, mid_vol);
+    assert_eq!(app.notifier_sound_volume_for_test(), mid_vol);
+}
+
+#[test]
+fn keyboard_zoom_shortcuts_sync_live_with_settings_slider_and_clamp() {
+    let size = Vec2::new(1040.0, 680.0);
+    let ctx = egui::Context::default();
+    let mut app = DesktopApp::new_headless(
+        &ctx,
+        configured_prefs(ThemePreference::Light),
+        Box::new(MemoryFallbackStore::new()),
+    );
+    app.set_test_snapshot(Some(sample_populated_snapshot()));
+
+    // Open Settings and scroll to the Zoom card.
+    let _ = run_frames(
+        &ctx,
+        &mut app,
+        size,
+        vec![Event::Key {
+            key: Key::Comma,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::COMMAND,
+        }],
+    );
+    let _ = scroll_settings_until(&ctx, &mut app, size, 16, -120.0, |rects| {
+        find_text_rect(rects, "Skala Tampilan (Zoom)").is_some()
+    });
+
+    // Press Ctrl++ twice -> live badge updates to 120% and zoom_factor to 1.20.
+    for _ in 0..2 {
+        let _ = run_frames(
+            &ctx,
+            &mut app,
+            size,
+            vec![Event::Key {
+                key: Key::Equals,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::COMMAND,
+            }],
+        );
+    }
+    let out_120 = run_frames(&ctx, &mut app, size, Vec::new());
+    let z_title = find_text_rect(&collect_text_rects(&out_120), "Skala Tampilan (Zoom)")
+        .expect("expected zoom card title");
+    assert!(
+        find_rect_near_y(&collect_text_rects(&out_120), "120%", z_title.center().y).is_some(),
+        "expected live 120% badge in Settings after Ctrl+="
+    );
+    assert_eq!(app.prefs().ui_zoom_pct, 120);
+    assert!((ctx.zoom_factor() - 1.20).abs() < 1e-5);
+
+    // Press Ctrl+0 -> resets badge to 100% and zoom_factor to 1.00.
+    let out_100 = run_frames(
+        &ctx,
+        &mut app,
+        size,
+        vec![Event::Key {
+            key: Key::Num0,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::COMMAND,
+        }],
+    );
+    let z_title_100 = find_text_rect(&collect_text_rects(&out_100), "Skala Tampilan (Zoom)")
+        .expect("expected zoom card title");
+    assert!(
+        find_rect_near_y(
+            &collect_text_rects(&out_100),
+            "100%",
+            z_title_100.center().y
+        )
+        .is_some(),
+        "expected live 100% badge in Settings after Ctrl+0"
+    );
+    assert_eq!(app.prefs().ui_zoom_pct, 100);
+    assert!((ctx.zoom_factor() - 1.00).abs() < 1e-5);
 }

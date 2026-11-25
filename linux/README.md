@@ -82,15 +82,23 @@ bash run.sh
   ```bash
   sudo pacman -S --needed gtk3 libayatana-appindicator libxkbcommon libxcb mesa dbus
   ```
-- **Wayland / Hyprland & System Tray:**
-  - Di sesi Linux Wayland native (seperti Hyprland, Sway, atau GNOME/KDE Wayland), `winit` tidak mendukung menyembunyikan jendela ke tray. Karena itu, menutup jendela (`X` atau keybind tutup jendela seperti `Super+C`) langsung menutup aplikasi agar jendela tidak macet di layar.
-  - Jika ingin memakai fitur sembunyikan ke system tray (*close-to-tray*) di Wayland, jalankan aplikasi lewat XWayland:
+- **Wayland, XWayland, X11 & System Tray:**
+  - **Pemilihan backend otomatis:** Secara default, `polban-absen-gui` memilih X11/XWayland secara otomatis selama `DISPLAY` tersedia dan koneksi X11 berhasil, lalu fallback ke Wayland native apabila `DISPLAY` tidak ada (sesi Wayland murni tanpa XWayland). Di **X11**, **Hyprland**, **Niri**, **Sway**, **KDE Wayland**, dan **GNOME Wayland**, jalankan `polban-absen-gui` atau `bash run-gui.sh` secara langsung tanpa perlu menyetel `WINIT_UNIX_BACKEND=x11`.
+  - **Identitas jendela:** jendela memakai `app_id` dan `WM_CLASS` `"polban-presensi"` di Wayland maupun X11/XWayland agar cocok dengan shortcut `polban-presensi.desktop`.
+  - **Deteksi layanan system tray:** mode sembunyikan ke tray (*close-to-tray* dan `--minimized`) aktif hanya ketika aplikasi berjalan di X11/XWayland **dan** host system tray terdeteksi (`org.kde.StatusNotifierWatcher` di D-Bus atau `_NET_SYSTEM_TRAY` di X11).
+  - **GNOME Wayland:** GNOME tidak menyertakan system tray bawaan. Pasang dan aktifkan ekstensi AppIndicator (misalnya *AppIndicator and KStatusNotifierItem Support*) beserta `libayatana-appindicator` jika ingin memakai *close-to-tray*. Tanpa host tray aktif, menutup jendela (`X`) langsung menghentikan aplikasi agar tidak tersembunyi tanpa ikon, dan `--minimized` fallback ke memperkecil jendela biasa.
+  - **Hyprland / Niri / Sway:** pastikan panel atau daemon StatusNotifier (seperti Waybar, Noctalia, atau panel tray sejenis) berjalan agar ikon tray dan *close-to-tray* aktif; jika tidak ada host tray aktif, menutup jendela langsung menghentikan aplikasi.
+  - **Wayland murni / override manual:** jika `DISPLAY` kosong atau Anda memaksa Wayland native dengan `WINIT_UNIX_BACKEND=wayland polban-absen-gui`, `winit` tidak mendukung `set_visible(false)`, sehingga menutup jendela keluar normal dan `--minimized` hanya memperkecil jendela. Anda tetap dapat memberi override opsional:
     ```bash
-    WINIT_UNIX_BACKEND=x11 polban-absen-gui
-    # atau via launcher di folder linux/:
-    WINIT_UNIX_BACKEND=x11 bash run-gui.sh
+    WINIT_UNIX_BACKEND=wayland polban-absen-gui   # paksa Wayland native
+    WINIT_UNIX_BACKEND=x11 polban-absen-gui       # utamakan X11/XWayland (fallback aman ke Wayland jika gagal)
     ```
-  - Gunakan `Ctrl+Q` kapan saja untuk keluar penuh dari aplikasi (termasuk saat mode *close-to-tray* aktif di X11/XWayland).
+  - **Skala tampilan (DPI) di X11 / XWayland:** saat berjalan pada backend X11/XWayland tanpa `WINIT_X11_SCALE_FACTOR` dan tanpa nilai `Xft.dpi` / `Xft/DPI` (misalnya default di Hyprland, Niri, Sway, atau i3), aplikasi otomatis memakai skala `1.0` (`WINIT_X11_SCALE_FACTOR=1`) agar ukuran UI seragam dengan aplikasi desktop lain dan tidak membesar berlebih akibat ukuran fisik monitor XRandR. Desktop yang menyetel `Xft.dpi` / `Xft/DPI` (GNOME, KDE Plasma, XFCE, atau pengguna `xrdb`) dan Wayland native tetap mengikuti skala masing-masing. Untuk skala manual (misalnya saat memakai `xwayland:force_zero_scaling = true` di Hyprland), setel:
+    ```bash
+    WINIT_X11_SCALE_FACTOR=1.5 polban-absen-gui
+    ```
+  - **Kontrol jendela pada tiling WM / compositor tanpa titlebar:** di **Hyprland**, **Niri**, **Sway**, **i3**, **River**, **bspwm**, **dwm**, **awesome**, **qtile**, **xmonad**, **herbstluftwm**, **leftwm**, dan WM sejenis, `polban-absen-gui` otomatis menampilkan bar kontrol jendela tipis di sisi atas (`Perkecil`, `Perbesar/Kembalikan Ukuran`, `Tutup`) beserta area geser/klik ganda, sedangkan desktop dengan titlebar bawaan (GNOME, KDE/Plasma, XFCE, Cinnamon, MATE, LXQt, Budgie, COSMIC, labwc, wayfire) tetap memakai titlebar native tanpa duplikasi. Gunakan `POLBAN_WINDOW_CONTROLS=1`, `0`, atau `auto` untuk menimpa deteksi otomatis.
+  - Gunakan `Ctrl+Q` kapan saja untuk keluar penuh dari aplikasi (termasuk saat *close-to-tray* aktif).
 - Kredensial di GUI disimpan lewat Secret Service OS (GNOME Keyring/KWallet) jika tersedia, atau memori sesi sebagai fallback.
 - Jalankan `bash install.sh --desktop` untuk menambahkan **Polban Presensi** ke menu aplikasi (`~/.local/share/applications/polban-presensi.desktop`).
 

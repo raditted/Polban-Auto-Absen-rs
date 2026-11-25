@@ -79,7 +79,9 @@ dependencies = [
  "thiserror 2.0.21",
  "tray-icon",
  "windows-sys 0.59.0",
+ "winit",
  "winresource",
+ "x11-dl",
  "zip",
 ]
 

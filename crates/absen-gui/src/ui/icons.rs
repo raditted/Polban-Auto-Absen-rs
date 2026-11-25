@@ -366,6 +366,47 @@ pub fn draw_close(painter: &egui::Painter, rect: Rect, color: Color32) {
     painter.line_segment([r.right_top(), r.left_bottom()], stroke);
 }
 
+/// Draw a sleek window minimize horizontal line (`1.3px` stroke) inside `rect`.
+pub fn draw_win_minimize(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let y = rect.center().y;
+    painter.line_segment(
+        [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
+        Stroke::new(1.3_f32, color),
+    );
+}
+
+/// Draw a crisp hollow square maximize icon (`1.3px` stroke) inside `rect`.
+pub fn draw_win_maximize(painter: &egui::Painter, rect: Rect, color: Color32) {
+    painter.rect_stroke(rect, egui::Rounding::ZERO, Stroke::new(1.3_f32, color));
+}
+
+/// Draw overlapping restore squares (`1.3px` stroke) inside `rect`.
+pub fn draw_win_restore(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let stroke = Stroke::new(1.3_f32, color);
+    let offset = rect.width().min(rect.height()) * 0.25;
+    let front = Rect::from_min_max(
+        Pos2::new(rect.left(), rect.top() + offset),
+        Pos2::new(rect.right() - offset, rect.bottom()),
+    );
+    painter.rect_stroke(front, egui::Rounding::ZERO, stroke);
+
+    let back_pts = vec![
+        Pos2::new(rect.left() + offset, rect.top() + offset),
+        Pos2::new(rect.left() + offset, rect.top()),
+        rect.right_top(),
+        Pos2::new(rect.right(), rect.bottom() - offset),
+        Pos2::new(rect.right() - offset, rect.bottom() - offset),
+    ];
+    painter.add(egui::Shape::line(back_pts, stroke));
+}
+
+/// Draw a crisp window close `X` icon (`1.3px` stroke) inside `rect`.
+pub fn draw_win_close(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let stroke = Stroke::new(1.3_f32, color);
+    painter.line_segment([rect.left_top(), rect.right_bottom()], stroke);
+    painter.line_segment([rect.right_top(), rect.left_bottom()], stroke);
+}
+
 /// Draw two overlapping document rectangles representing clipboard copy inside `rect`.
 pub fn draw_copy(painter: &egui::Painter, rect: Rect, color: Color32) {
     let r = rect.shrink(rect.width().min(rect.height()) * 0.18);

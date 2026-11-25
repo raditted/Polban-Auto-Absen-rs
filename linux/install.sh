@@ -162,6 +162,7 @@ Icon=${ICON_OUT}
 Terminal=false
 Categories=Education;Utility;
 StartupNotify=true
+StartupWMClass=polban-presensi
 EOF
     chmod +x "$DESKTOP_FILE"
     echo "    Shortcut .desktop dibuat: $DESKTOP_FILE"
