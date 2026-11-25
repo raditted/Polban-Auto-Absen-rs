@@ -4,11 +4,13 @@ Last updated: 2026-11-25 (Linux session)
 
 ## 1. Current Repository State
 
-- **Base branch:** `main` (`50bcb0c`: `feat(gui,linux): auto XWayland/tray host detection, tiling window controls, DPI fix, and cross-OS zoom/volume sliders`, package version `3.3.1`)
-- **Working tree:** Clean after committing `HANDOFF.md` and pushing to `origin/main` (local Linux `--release` binaries built in `target/release/`).
-- **Current focus:** Cross-OS verification via GitHub Actions CI (`windows-latest`, `macos-latest`, `ubuntu-latest`) and live Windows smoke-testing of the new UI zoom and notification volume sliders.
+- **Base branch:** `main` (`v3.4.0`, package version `3.4.0`; GitHub Actions CI run `45533910983` verified green on `ubuntu-latest`, `windows-latest`, and `macos-latest` for `50bcb0c`/`b5c0d33`)
+- **Working tree:** Clean after committing `v3.4.0` version bump / `HANDOFF.md` and pushing `main` + `v3.4.0` to `origin` (local Linux `--release` binaries built in `target/release/`).
+- **Current focus:** Live Windows smoke-testing of the new UI zoom and notification volume sliders plus `windows/*.exe` binary sync in the next Windows session.
 
 ### Recent Milestones
+- `v3.4.0`: Bumped workspace version to `3.4.0` (plus `windows/installer.iss`) with auto Linux XWayland/Wayland backend selection + live tray host detection, Linux tiling/borderless WM window controls (`ui/titlebar.rs`), X11/XWayland default DPI fix (`WINIT_X11_SCALE_FACTOR=1`), and cross-OS UI zoom & notification volume sliders.
+- `b5c0d33`: Updated tracked English [HANDOFF.md](HANDOFF.md) for cross-OS handoff after Linux fixes and GUI sliders (CI verified green across `ubuntu-latest`, `windows-latest`, and `macos-latest`).
 - `50bcb0c`: Auto-selected X11/XWayland when `DISPLAY` is reachable (with `WINIT_X11_SCALE_FACTOR=1` default DPI guard), added live `StatusNotifierWatcher` + `_NET_SYSTEM_TRAY` tray host detection, added Linux tiling/borderless in-app window controls (`ui/titlebar.rs`), aligned `StartupWMClass`/`app_id` as `polban-presensi`, and added cross-OS Settings sliders for UI zoom (`70..=150%`, synced with `Ctrl/Cmd +/-/0`) and notification volume (`0..=100%`).
 - `63b7e39`: Added tracked English [HANDOFF.md](HANDOFF.md) for cross-OS context sync.
 - `f5ee2c1`: Upgraded GitHub Actions (`actions/checkout@v6`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`, `softprops/action-gh-release@v3`) to Node 24 runtimes.
@@ -46,12 +48,10 @@ Last updated: 2026-11-25 (Linux session)
 
 ## 3. Active Focus / Next TODOs
 
-- **Verify GitHub Actions CI (`ci.yml`):** confirm `windows-latest`, `macos-latest`, and `ubuntu-latest` checks pass for the pushed `main` commits (`50bcb0c` and this `HANDOFF.md` commit).
 - **Next Windows session:**
   1. Run `git pull origin main`.
   2. Build `--release` (`cargo build --release --bin polban-absen --bin polban-absen-gui`) and sync `target/release/*.exe` -> `windows/*.exe` with SHA256 verification (checking running processes first).
   3. Live-test the new Settings UI Zoom slider (`Ctrl +`/`-`/`0`, live preview, Save/Cancel) and Notification Volume slider (`0%` mute, `50%`, `100%` via `PlaySoundW` + `Uji Notifikasi`), and confirm no regression in Win32 tray close/restore or custom pixel-art toasts.
-- **Optional future release:** bump version (`3.3.2` or `3.4.0`) across `Cargo.toml`, `Cargo.lock`, and `windows/installer.iss`, then push a release tag when ready to publish updated artifacts.
 - **Minor pre-existing macOS note from audit:** clicking a custom macOS toast (`toast_macos.rs`) after close-to-tray invokes `wake_callback` to reveal the window without resetting `controller.set_window_visible(true)` (unlike `TrayCommand::ShowWindow`), so 1s `Countdown` ticks stay suppressed until shown via tray or another focus path.
 
 ---
