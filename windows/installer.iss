@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "3.4.0"
+  #define AppVersion "3.4.1"
 #endif
 #ifndef BinaryPath
   #define BinaryPath "..\target\release\polban-absen-gui.exe"

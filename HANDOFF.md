@@ -4,12 +4,13 @@ Last updated: 2026-11-25 (Linux session)
 
 ## 1. Current Repository State
 
-- **Base branch:** `main` (`v3.4.0` commit `a237f5e`, with uncommitted cross-OS in-app auto-updater changes ready for final verification/commit)
-- **Working tree:** Active cross-OS auto-updater updates in `crates/absen-gui/` (`Cargo.toml`, `Cargo.lock`, `updater.rs`, `app.rs`, `ui/header.rs`, `ui/settings.rs`, `tests/ui_headless.rs`) and docs (`AGENTS.md`, `linux/README.md`, `README.md`, `HANDOFF.md`).
-- **Current focus:** Verify and ship cross-OS in-app auto-updater (`Windows`, `Linux` Fedora RPM + `.tar.gz`, `macOS` `.app` ZIP + standalone binary, and non-blocking `OpenReleasePage` fallback), then live-test on Windows/macOS.
+- **Base branch:** `main` (`v3.4.1`, package version `3.4.1`; GitHub Actions CI run `45555097816` verified green on `ubuntu-latest`, `windows-latest`, and `macos-latest` for `a42edc7`)
+- **Working tree:** Clean after committing `v3.4.1` version bump / `HANDOFF.md` and pushing `main` + `v3.4.1` to `origin` (local Linux `--release` binaries built in `target/release/`).
+- **Current focus:** Live Windows/macOS smoke-testing of the cross-OS in-app auto-updater, UI zoom and notification volume sliders, plus `windows/*.exe` binary sync in the next Windows session.
 
 ### Recent Milestones
-- `Uncommitted (post-v3.4.0)`: Extended in-app auto-updater with `SHA256SUMS.txt` verification across Windows (Portable ZIP / Setup EXE), Linux (Fedora RPM non-blocking Polkit `pkexec` install + pure-Rust `flate2`/tar `.tar.gz` self-replace), macOS (`.app` bundle ZIP + standalone binary swap + `.app.old` startup cleanup), non-blocking `OpenReleasePage` browser fallback, and `UpdateStatus::Installing` UI/test coverage.
+- `v3.4.1`: Bumped workspace version to `3.4.1` (plus `windows/installer.iss`) after cross-OS in-app auto-updater (`a42edc7`) passed GitHub Actions CI across `ubuntu-latest`, `windows-latest`, and `macos-latest`.
+- `a42edc7`: Extended in-app auto-updater with `SHA256SUMS.txt` verification across Windows (Portable ZIP / Setup EXE), Linux (Fedora RPM non-blocking Polkit `pkexec` install + pure-Rust `flate2`/tar `.tar.gz` self-replace), macOS (`.app` bundle ZIP + standalone binary swap + `.app.old` startup cleanup), non-blocking `OpenReleasePage` browser fallback, and `UpdateStatus::Installing` UI/test coverage.
 - `v3.4.0` (`a237f5e`): Bumped workspace version to `3.4.0` (plus `windows/installer.iss`) with auto Linux XWayland/Wayland backend selection + live tray host detection, Linux tiling/borderless WM window controls (`ui/titlebar.rs`), X11/XWayland default DPI fix (`WINIT_X11_SCALE_FACTOR=1`), and cross-OS UI zoom & notification volume sliders.
 - `b5c0d33`: Updated tracked English [HANDOFF.md](HANDOFF.md) for cross-OS handoff after Linux fixes and GUI sliders (CI verified green across `ubuntu-latest`, `windows-latest`, and `macos-latest`).
 - `50bcb0c`: Auto-selected X11/XWayland when `DISPLAY` is reachable (with `WINIT_X11_SCALE_FACTOR=1` default DPI guard), added live `StatusNotifierWatcher` + `_NET_SYSTEM_TRAY` tray host detection, added Linux tiling/borderless in-app window controls (`ui/titlebar.rs`), aligned `StartupWMClass`/`app_id` as `polban-presensi`, and added cross-OS Settings sliders for UI zoom (`70..=150%`, synced with `Ctrl/Cmd +/-/0`) and notification volume (`0..=100%`).
