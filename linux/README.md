@@ -65,7 +65,11 @@ bash run.sh
   ```bash
   sudo dnf install ./Polban-Presensi-Fedora-x64.rpm
   ```
-  Paket RPM memasang binary ke `/usr/bin/polban-absen-gui`, ikon, serta shortcut aplikasi **Polban Presensi** otomatis. Untuk memperbarui versi ke depannya, jalankan `sudo dnf upgrade ./Polban-Presensi-Fedora-x64.rpm`.
+  Paket RPM memasang binary ke `/usr/bin/polban-absen-gui`, ikon, serta shortcut aplikasi **Polban Presensi** otomatis. Pembaruan berikutnya dapat dilakukan langsung dari tombol **Update** di dalam aplikasi (mengunduh `.rpm`, memverifikasi `SHA256SUMS.txt`, lalu memasang di latar belakang lewat otorisasi Polkit `pkexec` saat **Restart untuk Update**), atau manual lewat `sudo dnf upgrade ./Polban-Presensi-Fedora-x64.rpm`.
+- **Pembaruan otomatis di aplikasi (Auto-Update):**
+  - **Instalasi RPM Fedora:** bila aplikasi terpasang lewat RPM dan `pkexec` + `dnf`/`rpm` tersedia, pembaruan berjalan non-blocking di latar belakang lalu me-restart aplikasi otomatis setelah otorisasi Polkit berhasil (jika dibatalkan, status kembali ke **Gagal Update** untuk dicoba ulang tanpa menutup aplikasi).
+  - **Instalasi portabel (`.tar.gz` / `install.sh`):** pada sistem Linux `x86_64` non-RPM di folder yang dapat ditulis pengguna, aplikasi mengunduh `Polban-Presensi-Linux-x64.tar.gz`, memverifikasi `SHA256SUMS.txt`, mengekstrak `polban-absen-gui`, lalu mengganti binary dan me-restart otomatis.
+  - **Fallback browser:** jika lokasi instalasi tidak dikelola RPM dan tidak dapat ditulis (atau pada arsitektur selain `x86_64`), tombol **Update** membuka halaman rilis di browser secara non-blocking.
 - Jika membangun `polban-absen-gui` dari source di Fedora, pasang paket development berikut:
   ```bash
   sudo dnf install -y gtk3-devel libayatana-appindicator-gtk3-devel \

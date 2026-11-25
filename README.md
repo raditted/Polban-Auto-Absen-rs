@@ -35,7 +35,11 @@ Oleh [raditted](https://github.com/raditted), berdasarkan proyek asli oleh Haika
 
 - Klik **Jalankan Presensi Otomatis** di bagian atas untuk mulai memantau jadwal dan menekan tombol presensi biru secara otomatis.
 - Jika Anda menekan tombol tutup (`X`), jendela disembunyikan ke system tray dan notifikasi desktop akan memberi tahu bahwa aplikasi masih berjalan di latar belakang. Klik ikon di system tray untuk membuka jendela kembali, atau klik kanan lalu pilih **Keluar** untuk menutup aplikasi sepenuhnya. Di Linux, aplikasi otomatis memakai X11/XWayland bila tersedia sehingga system tray aktif di sebagian besar desktop; pada sesi Wayland murni atau desktop tanpa layanan system tray (misalnya GNOME tanpa ekstensi AppIndicator), tombol tutup langsung menutup aplikasi (lihat [linux/README.md](linux/README.md)).
-- Saat versi baru tersedia, tombol **Update** akan muncul di bilah atas tanpa mengganggu pemakaian. Klik tombol tersebut untuk mengunduh pembaruan di latar belakang, lalu klik **Restart untuk Update** ketika verifikasi selesai.
+- Saat versi baru tersedia, tombol **Update** muncul di bilah atas tanpa mengganggu pemakaian. Klik tombol tersebut untuk memperbarui langsung di dalam aplikasi dengan verifikasi `SHA256SUMS.txt`:
+  - **Windows:** mendukung pembaruan otomatis untuk versi Portable ZIP (mengganti `.exe` langsung) maupun Installer EXE.
+  - **Linux:** mendukung pembaruan otomatis untuk paket RPM Fedora (otorisasi Polkit `pkexec` di latar belakang saat **Restart untuk Update**) serta arsip portabel `Polban-Presensi-Linux-x64.tar.gz` di folder yang dapat ditulis.
+  - **macOS:** mendukung pembaruan otomatis untuk bundle `Polban Presensi.app` (Apple Silicon dan Intel) di folder yang dapat ditulis.
+  - Jika lingkungan tidak mendukung pemasangan otomatis, tombol **Update** membuka halaman rilis di browser secara non-blocking.
 
 Shortcut keyboard di aplikasi desktop: `Ctrl+,` (Pengaturan), `Escape` (tutup Pengaturan), `Ctrl+R` (Mulai atau Hentikan pemantauan), `F5` (Cek Sekarang), `Ctrl+Q` (Keluar penuh).
 

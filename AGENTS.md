@@ -95,9 +95,13 @@ Cross-OS notes:
 
 ### Non-Blocking Auto-Updater & Single-Instance (`updater.rs`, `main.rs`)
 - **Never add a blocking update gate on startup** (unlike Discord). The app must open immediately and remain usable when offline or when an update is ignored.
-- The header renders no update button for `Idle`/`Checking`/`UpToDate`; show a pill only for `Available` (`Update vX.Y.Z`), `Downloading`, `ReadyToRestart` (`Restart untuk Update`), or `Failed`.
-- Verify downloaded release artifacts against `SHA256SUMS.txt` from the same release before installing.
-- Before spawning the new binary on restart, call `SingleInstanceHandle::release()` first so the new process does not exit thinking the old instance still holds the lock. Clean up leftover `*.old` binaries on startup.
+- The header renders no update button for `Idle`/`Checking`/`UpToDate`; show a pill only for `Available` (`Update vX.Y.Z`, with strategy-accurate tooltip for in-app download vs `OpenReleasePage`), `Downloading`, `ReadyToRestart` (`Restart untuk Update`), `Installing` (`Memasang...`, also disables *Cek Pembaruan* in Settings), or `Failed`.
+- Verify downloaded release artifacts against `SHA256SUMS.txt` from the same release before staging/installing across all in-app strategies:
+  - **Windows**: `WindowsPortableZip` (`.new`/`.old` exe swap) when exe dir is writable, falling back to `WindowsInstallerExe`.
+  - **Linux**: `LinuxFedoraRpm` (when `rpm -qf <current_exe>` + `pkexec` + `dnf`/`rpm` are detected) saves the verified `.rpm` and, on *Restart untuk Update*, runs `pkexec dnf upgrade -y` / `rpm -U` off the UI thread (`UpdateStatus::Installing` -> `take_ready_relaunch()` -> `relaunch_after_install`) without blocking UI or exiting if Polkit is cancelled; non-RPM writable `x86_64` binaries use `LinuxTarGz` (`flate2` + pure-Rust tar reader with path-traversal rejection).
+  - **macOS**: `MacOsAppZip` (`Polban-Presensi-macOS-AppleSilicon.zip` / `Polban-Presensi-macOS-Intel.zip`, pure-Rust `.app` bundle replacement via `.app.new`/`.app.old` and `open -n`) when inside a writable `.app` bundle, or `MacOsBinaryZip` for standalone writable binaries.
+  - **Fallback**: `OpenReleasePage` spawns browser launch (`xdg-open` with `gio open` fallback on Linux, `open` on macOS, `cmd /C start` on Windows) off the UI thread and surfaces errors via `UpdateStatus::Failed` + `manual_note`.
+- Before spawning the new binary/bundle on restart, call `SingleInstanceHandle::release()` first (`apply_update_and_restart` / `relaunch_after_install`) so the new process does not exit thinking the old instance still holds the lock. Clean up leftover `*.old` binaries and `*.app.old` directories on startup (`cleanup_old_executables()`).
 
 ### Core & TUI Resilience (`absen-core`, `absen-cli`)
 - Validate numeric config values (reject `NaN`, `±Inf`, negatives) before passing to `Duration` or `rand::gen_range`; use `checked_add` for `Instant` arithmetic; persist state atomically (temp file + rename).

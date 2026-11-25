@@ -14,11 +14,12 @@ use crate::prefs::{
     MAX_UI_ZOOM_PCT, MIN_NOTIFICATION_VOLUME, MIN_UI_ZOOM_PCT,
 };
 use crate::theme::{AppearanceConfig, Palette, ThemeTokens};
+use crate::ui::header::available_update_tooltip;
 use crate::ui::{
     action_button, hairline_divider, icons, labeled_text_input, mono_text, paint_focus_ring,
     segmented_control, semibold_text, status_badge, switch_row, ButtonTone, SemanticTone,
 };
-use crate::updater::{UpdateStatus, CURRENT_VERSION};
+use crate::updater::{AssetStrategy, UpdateStatus, CURRENT_VERSION};
 
 /// Editable settings and onboarding form state; `Debug` redacts the password buffer.
 #[derive(Clone)]
@@ -1794,9 +1795,10 @@ pub fn show(
                                     ui.add_space(ThemeTokens::SPACE_SM);
                                     ui.horizontal_wrapped(|ui| {
                                         ui.spacing_mut().item_spacing = Vec2::splat(ThemeTokens::SPACE_SM);
-                                        let is_downloading = matches!(
+                                        let is_busy = matches!(
                                             update_status,
                                             UpdateStatus::Downloading { .. }
+                                                | UpdateStatus::Installing { .. }
                                         );
                                         let check_label = if checking_update {
                                             "Memeriksa..."
@@ -1809,7 +1811,7 @@ pub fn show(
                                             ButtonTone::Secondary,
                                             check_label,
                                             Some(icons::draw_refresh),
-                                            !checking_update && !is_downloading,
+                                            !checking_update && !is_busy,
                                             0.0,
                                         )
                                         .clicked()
@@ -1820,15 +1822,27 @@ pub fn show(
                                         match update_status {
                                             UpdateStatus::Available(candidate) => {
                                                 let lbl = format!("Update v{}", candidate.version);
+                                                let icon_fn = if candidate.strategy
+                                                    == AssetStrategy::OpenReleasePage
+                                                {
+                                                    icons::draw_external_link
+                                                } else {
+                                                    icons::draw_download
+                                                };
+                                                let tooltip = available_update_tooltip(
+                                                    &candidate.version,
+                                                    candidate.strategy,
+                                                );
                                                 if action_button(
                                                     ui,
                                                     palette,
                                                     ButtonTone::Primary,
                                                     &lbl,
-                                                    Some(icons::draw_download),
+                                                    Some(icon_fn),
                                                     true,
                                                     0.0,
                                                 )
+                                                .on_hover_text(tooltip)
                                                 .clicked()
                                                 {
                                                     action = Some(SettingsAction::StartUpdate);
@@ -1870,6 +1884,20 @@ pub fn show(
                                                 {
                                                     action = Some(SettingsAction::RestartToUpdate);
                                                 }
+                                            }
+                                            UpdateStatus::Installing { version } => {
+                                                let tooltip =
+                                                    format!("Memasang pembaruan v{version}...");
+                                                action_button(
+                                                    ui,
+                                                    palette,
+                                                    ButtonTone::Secondary,
+                                                    "Memasang...",
+                                                    Some(icons::draw_refresh),
+                                                    false,
+                                                    0.0,
+                                                )
+                                                .on_disabled_hover_text(tooltip);
                                             }
                                             UpdateStatus::Failed {
                                                 retry_candidate: Some(_),

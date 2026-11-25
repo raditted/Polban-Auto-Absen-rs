@@ -30,7 +30,10 @@ use crate::ui::proof::{ProofAction, ProofScreenshotView};
 use crate::ui::settings::{OnboardingAction, SettingsAction, SettingsState};
 use crate::ui::titlebar::{self, TitlebarAction};
 use crate::ui::{activity, header, jadwal, proof, settings, CompactTab};
-use crate::updater::{is_safe_http_url, open_url_in_browser, UpdateManager, UpdateStatus};
+use crate::updater::{
+    is_safe_http_url, open_url_in_browser, relaunch_after_install, RestartPlan, UpdateManager,
+    UpdateStatus,
+};
 
 struct LoadedProofTexture {
     key: String,
@@ -834,11 +837,11 @@ impl AppCore {
         }
     }
 
-    fn handle_restart_to_update(&mut self, ctx: &egui::Context) {
-        let plan = match &self.updater.status {
-            UpdateStatus::ReadyToRestart { plan, .. } => plan.clone(),
-            _ => return,
-        };
+    fn finish_update_restart(
+        &mut self,
+        ctx: &egui::Context,
+        launch: impl FnOnce(&dyn Fn()) -> Result<(), String>,
+    ) {
         self.controller.stop();
         self.persist_prefs();
         self.tray.take();
@@ -856,7 +859,7 @@ impl AppCore {
             return;
         }
 
-        match crate::updater::apply_update_and_restart(&plan, &release_fn) {
+        match launch(&release_fn) {
             Ok(()) => {
                 std::process::exit(0);
             }
@@ -871,8 +874,39 @@ impl AppCore {
         }
     }
 
+    fn handle_restart_to_update(&mut self, ctx: &egui::Context) {
+        let (version, plan) = match &self.updater.status {
+            UpdateStatus::ReadyToRestart { version, plan } => (version.clone(), plan.clone()),
+            _ => return,
+        };
+
+        if !self.headless {
+            if let RestartPlan::RunLinuxRpmUpgrade {
+                rpm_path,
+                current_exe,
+            } = plan
+            {
+                self.updater
+                    .start_rpm_install(ctx, version, rpm_path, current_exe);
+                return;
+            }
+        }
+
+        self.finish_update_restart(ctx, |release_fn| {
+            crate::updater::apply_update_and_restart(&plan, release_fn)
+        });
+    }
+
     fn poll_background_tasks(&mut self, ctx: &egui::Context) {
         self.updater.poll();
+        if let Some(relaunch_path) = self.updater.take_ready_relaunch() {
+            self.finish_update_restart(ctx, |release_fn| {
+                relaunch_after_install(&relaunch_path, release_fn)
+            });
+            if self.quit_requested {
+                return;
+            }
+        }
 
         if let Some(rx) = &self.import_pick_rx {
             match rx.try_recv() {
@@ -1256,6 +1290,9 @@ impl AppCore {
             return;
         }
         self.poll_background_tasks(ctx);
+        if self.quit_requested {
+            return;
+        }
 
         if ctx.input(|i| i.viewport().close_requested()) {
             self.handle_window_close(ctx, true);
@@ -2851,5 +2888,43 @@ mod tests {
         }
         assert_eq!(app.prefs().notification_volume, 0);
         assert_eq!(app.notifier_sound_volume_for_test(), 0);
+    }
+
+    #[test]
+    fn handle_restart_to_update_releases_lock_safely_in_headless_mode() {
+        for plan in [
+            RestartPlan::RunLinuxRpmUpgrade {
+                rpm_path: PathBuf::from("/tmp/Polban-Presensi-Fedora-x64.rpm"),
+                current_exe: PathBuf::from("/usr/bin/polban-absen-gui"),
+            },
+            RestartPlan::ReplaceMacOsApp {
+                current_app: PathBuf::from("/Applications/Polban Presensi.app"),
+                staged_app: PathBuf::from("/Applications/.Polban Presensi.app.new"),
+                relaunch_exe: PathBuf::from(
+                    "/Applications/Polban Presensi.app/Contents/MacOS/polban-absen-gui",
+                ),
+            },
+        ] {
+            let ctx = egui::Context::default();
+            let mut app = DesktopApp::new_headless(
+                &ctx,
+                AppPrefs::default(),
+                Box::new(MemoryFallbackStore::new()),
+            );
+            let released = Arc::new(AtomicBool::new(false));
+            let released_cb = Arc::clone(&released);
+            app.set_release_instance_lock(Arc::new(move || {
+                released_cb.store(true, Ordering::Release);
+            }));
+            app.set_update_status_for_test(UpdateStatus::ReadyToRestart {
+                version: "9.9.9".to_string(),
+                plan,
+            });
+
+            app.core.borrow_mut().handle_restart_to_update(&ctx);
+
+            assert!(released.load(Ordering::Acquire));
+            assert!(app.core.borrow().quit_requested);
+        }
     }
 }

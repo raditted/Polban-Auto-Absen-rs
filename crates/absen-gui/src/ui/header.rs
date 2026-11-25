@@ -11,7 +11,7 @@ use crate::ui::{
     action_button, hairline_divider, icons, mono_text, paint_focus_ring, semibold_text,
     status_badge, ButtonTone, SemanticTone,
 };
-use crate::updater::UpdateStatus;
+use crate::updater::{AssetStrategy, UpdateStatus};
 
 /// Actions emitted by the header bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -303,6 +303,14 @@ fn update_pill_button(
     clicked
 }
 
+pub(crate) fn available_update_tooltip(version: &str, strategy: AssetStrategy) -> String {
+    if strategy == AssetStrategy::OpenReleasePage {
+        format!("Versi v{version} tersedia. Klik untuk membuka halaman rilis.")
+    } else {
+        format!("Versi v{version} tersedia. Klik untuk mengunduh pembaruan di latar belakang.")
+    }
+}
+
 fn render_update_pill(
     ui: &mut egui::Ui,
     palette: &Palette,
@@ -313,15 +321,17 @@ fn render_update_pill(
         UpdateStatus::Idle | UpdateStatus::Checking | UpdateStatus::UpToDate => {}
         UpdateStatus::Available(candidate) => {
             let label = format!("Update v{}", candidate.version);
-            let tooltip = format!(
-                "Versi v{} tersedia. Klik untuk mengunduh pembaruan di latar belakang.",
-                candidate.version
-            );
+            let tooltip = available_update_tooltip(&candidate.version, candidate.strategy);
+            let icon_fn = if candidate.strategy == AssetStrategy::OpenReleasePage {
+                icons::draw_external_link
+            } else {
+                icons::draw_download
+            };
             if update_pill_button(
                 ui,
                 palette,
                 SemanticTone::Blue,
-                icons::draw_download,
+                icon_fn,
                 &label,
                 true,
                 &tooltip,
@@ -369,6 +379,18 @@ fn render_update_pill(
             ) {
                 *action = Some(HeaderAction::RestartToUpdate);
             }
+        }
+        UpdateStatus::Installing { version } => {
+            let tooltip = format!("Memasang pembaruan v{version}...");
+            update_pill_button(
+                ui,
+                palette,
+                SemanticTone::Blue,
+                icons::draw_refresh,
+                "Memasang...",
+                false,
+                &tooltip,
+            );
         }
         UpdateStatus::Failed {
             message,

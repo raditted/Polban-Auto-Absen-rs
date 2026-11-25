@@ -4,12 +4,13 @@ Last updated: 2026-11-25 (Linux session)
 
 ## 1. Current Repository State
 
-- **Base branch:** `main` (`v3.4.0`, package version `3.4.0`; GitHub Actions CI run `45533910983` verified green on `ubuntu-latest`, `windows-latest`, and `macos-latest` for `50bcb0c`/`b5c0d33`)
-- **Working tree:** Clean after committing `v3.4.0` version bump / `HANDOFF.md` and pushing `main` + `v3.4.0` to `origin` (local Linux `--release` binaries built in `target/release/`).
-- **Current focus:** Live Windows smoke-testing of the new UI zoom and notification volume sliders plus `windows/*.exe` binary sync in the next Windows session.
+- **Base branch:** `main` (`v3.4.0` commit `a237f5e`, with uncommitted cross-OS in-app auto-updater changes ready for final verification/commit)
+- **Working tree:** Active cross-OS auto-updater updates in `crates/absen-gui/` (`Cargo.toml`, `Cargo.lock`, `updater.rs`, `app.rs`, `ui/header.rs`, `ui/settings.rs`, `tests/ui_headless.rs`) and docs (`AGENTS.md`, `linux/README.md`, `README.md`, `HANDOFF.md`).
+- **Current focus:** Verify and ship cross-OS in-app auto-updater (`Windows`, `Linux` Fedora RPM + `.tar.gz`, `macOS` `.app` ZIP + standalone binary, and non-blocking `OpenReleasePage` fallback), then live-test on Windows/macOS.
 
 ### Recent Milestones
-- `v3.4.0`: Bumped workspace version to `3.4.0` (plus `windows/installer.iss`) with auto Linux XWayland/Wayland backend selection + live tray host detection, Linux tiling/borderless WM window controls (`ui/titlebar.rs`), X11/XWayland default DPI fix (`WINIT_X11_SCALE_FACTOR=1`), and cross-OS UI zoom & notification volume sliders.
+- `Uncommitted (post-v3.4.0)`: Extended in-app auto-updater with `SHA256SUMS.txt` verification across Windows (Portable ZIP / Setup EXE), Linux (Fedora RPM non-blocking Polkit `pkexec` install + pure-Rust `flate2`/tar `.tar.gz` self-replace), macOS (`.app` bundle ZIP + standalone binary swap + `.app.old` startup cleanup), non-blocking `OpenReleasePage` browser fallback, and `UpdateStatus::Installing` UI/test coverage.
+- `v3.4.0` (`a237f5e`): Bumped workspace version to `3.4.0` (plus `windows/installer.iss`) with auto Linux XWayland/Wayland backend selection + live tray host detection, Linux tiling/borderless WM window controls (`ui/titlebar.rs`), X11/XWayland default DPI fix (`WINIT_X11_SCALE_FACTOR=1`), and cross-OS UI zoom & notification volume sliders.
 - `b5c0d33`: Updated tracked English [HANDOFF.md](HANDOFF.md) for cross-OS handoff after Linux fixes and GUI sliders (CI verified green across `ubuntu-latest`, `windows-latest`, and `macos-latest`).
 - `50bcb0c`: Auto-selected X11/XWayland when `DISPLAY` is reachable (with `WINIT_X11_SCALE_FACTOR=1` default DPI guard), added live `StatusNotifierWatcher` + `_NET_SYSTEM_TRAY` tray host detection, added Linux tiling/borderless in-app window controls (`ui/titlebar.rs`), aligned `StartupWMClass`/`app_id` as `polban-presensi`, and added cross-OS Settings sliders for UI zoom (`70..=150%`, synced with `Ctrl/Cmd +/-/0`) and notification volume (`0..=100%`).
 - `63b7e39`: Added tracked English [HANDOFF.md](HANDOFF.md) for cross-OS context sync.
@@ -45,13 +46,17 @@ Last updated: 2026-11-25 (Linux session)
 - **Cross-OS UI zoom & notification volume invariants:**
   - `prefs.rs`, `app.rs`, and `ui/settings.rs`: `ui_zoom_pct` (`70..=150%`, default `100%`) and `notification_volume` (`0..=100%`, default `100%`) use backward-compatible serde defaults and clamping deserializers. Built-in `zoom_with_keyboard` is disabled in `DesktopApp::new` and `new_headless` so `Ctrl/Cmd +` / `=` / `-` / `0` step deterministically (`10%`, ignoring `AltGr`), persist immediately, and stay synced with the Settings slider; `PreviewZoom` reverts on Cancel/Esc/backdrop dismiss.
   - `platform/sound.rs` and `platform/notify.rs`: `sound.rs` decodes the embedded MP3 once (`DECODED_PCM` `OnceLock`) and caches `'static` per-volume WAV slices (`[OnceLock<Option<Vec<u8>>>; 101]`), returning silently at `0%` and preserving bit-exact PCM at `100%` (using `(v / 100.0)^1.5` gain for `1..99%`). Windows `PlaySoundW(SND_MEMORY | SND_ASYNC | SND_NODEFAULT)` safely reads `'static` WAV slices; macOS (`afplay`) and Linux (`paplay`/`pw-play`/`aplay`) write atomic volume-keyed temp WAV files (`polban-presensi-notification-v{clamped}.wav`). Desktop notifications use `toast_win32.rs` (Windows), `toast_macos.rs` (macOS), and `notify-rust` (Linux/BSD D-Bus), with `Uji Notifikasi` reflecting the live Settings volume slider immediately.
+- **Cross-OS auto-updater invariants (`updater.rs`, `app.rs`, `ui/header.rs`, `ui/settings.rs`):**
+  - `HostUpdateCapabilities` + `select_release_asset_for_host` pick `WindowsPortableZip` / `WindowsInstallerExe`, `LinuxFedoraRpm` (`rpm -qf` + `pkexec` + `dnf`/`rpm`) / `LinuxTarGz` (`x86_64` writable), `MacOsAppZip` (`Polban-Presensi-macOS-AppleSilicon.zip` / `Polban-Presensi-macOS-Intel.zip` when inside a writable `.app` bundle) / `MacOsBinaryZip`, or `OpenReleasePage`. Both GitHub API and rate-limit web fallback (`web_probe_asset_names` + `SHA256SUMS.txt` verification) support all three OSes.
+  - Extraction uses `flate2` + a pure-Rust ustar/PAX/GNU LongName tar reader (`extract_binary_from_tar_gz`) and `zip::ZipArchive` (`extract_macos_app_from_zip`, `extract_macos_binary_from_zip`) with path-traversal and symlink rejection plus `0o755` permissions on Unix. Atomic `.old` swaps roll back on error, and `cleanup_old_executables()` removes both `.old` files and `.app.old` directories on startup.
+  - Privileged Linux RPM upgrades (`RestartPlan::RunLinuxRpmUpgrade`) run `pkexec dnf upgrade -y` / `rpm -U` off the UI thread (`UpdateStatus::Installing { version }`), keeping the engine/tray alive; cancelling Polkit (`126`/`127`) returns retryable `UpdateStatus::Failed`, while success signals `take_ready_relaunch()` -> `relaunch_after_install()` (releasing single-instance lock strictly before spawning). `OpenReleasePage` also opens browsers off the UI thread (`xdg-open` with `gio open` fallback on Linux) and surfaces errors via `UpdateStatus::Failed` + `manual_note`.
 
 ## 3. Active Focus / Next TODOs
 
 - **Next Windows session:**
   1. Run `git pull origin main`.
   2. Build `--release` (`cargo build --release --bin polban-absen --bin polban-absen-gui`) and sync `target/release/*.exe` -> `windows/*.exe` with SHA256 verification (checking running processes first).
-  3. Live-test the new Settings UI Zoom slider (`Ctrl +`/`-`/`0`, live preview, Save/Cancel) and Notification Volume slider (`0%` mute, `50%`, `100%` via `PlaySoundW` + `Uji Notifikasi`), and confirm no regression in Win32 tray close/restore or custom pixel-art toasts.
+  3. Live-test the Settings UI Zoom slider (`Ctrl +`/`-`/`0`, live preview, Save/Cancel), Notification Volume slider (`0%` mute, `50%`, `100%` via `PlaySoundW` + `Uji Notifikasi`), and cross-OS auto-updater (Portable ZIP / Setup EXE check & download), and confirm no regression in Win32 tray close/restore or custom pixel-art toasts.
 - **Minor pre-existing macOS note from audit:** clicking a custom macOS toast (`toast_macos.rs`) after close-to-tray invokes `wake_callback` to reveal the window without resetting `controller.set_window_visible(true)` (unlike `TrayCommand::ShowWindow`), so 1s `Countdown` ticks stay suppressed until shown via tray or another focus path.
 
 ---

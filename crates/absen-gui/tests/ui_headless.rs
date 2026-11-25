@@ -95,6 +95,63 @@ fn assert_no_horizontal_overflow(output: &egui::FullOutput, max_width: f32, labe
     }
 }
 
+fn run_hover_frames(
+    ctx: &egui::Context,
+    app: &mut DesktopApp,
+    size: Vec2,
+    pos: Pos2,
+) -> egui::FullOutput {
+    // Drain any residual MouseWheel smooth_scroll_delta (capped at 0.1s/frame in egui)
+    // so `should_show_hover_ui` sees `smooth_scroll_delta == Vec2::ZERO`.
+    for _ in 0..16 {
+        if ctx.input(|i| i.smooth_scroll_delta == Vec2::ZERO) {
+            break;
+        }
+        let next_t = ctx.input(|i| i.time) + 0.1;
+        let drain_input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+            time: Some(next_t),
+            ..Default::default()
+        };
+        let _ = ctx.run(drain_input, |c| app.update_ui(c));
+    }
+
+    // Feed a short 3-sample pointer trajectory (> 0.01s, < 0.1s) after any prior click so egui
+    // updates `last_move_time`, then settle > 0.1s so `pointer.is_still()` returns true.
+    let base_t = ctx.input(|i| i.time) + 0.15;
+    for (idx, p) in [
+        Pos2::new((pos.x - 2.0).max(0.0), pos.y),
+        Pos2::new((pos.x - 1.0).max(0.0), pos.y),
+        pos,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let move_input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+            time: Some(base_t + (idx as f64) * 0.02),
+            events: vec![Event::PointerMoved(p)],
+            ..Default::default()
+        };
+        let _ = ctx.run(move_input, |c| app.update_ui(c));
+    }
+
+    let mut out = Default::default();
+    for _ in 0..4 {
+        let next_t = ctx.input(|i| i.time) + 0.06;
+        let settle_input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+            time: Some(next_t),
+            ..Default::default()
+        };
+        out = ctx.run(settle_input, |c| app.update_ui(c));
+        if ctx.input(|i| i.pointer.is_still() && i.smooth_scroll_delta == Vec2::ZERO) {
+            break;
+        }
+    }
+    out
+}
+
 fn run_frames(
     ctx: &egui::Context,
     app: &mut DesktopApp,
@@ -811,12 +868,13 @@ fn all_19_light_and_dark_theme_presets_render_without_overflow_across_viewports(
 #[test]
 fn header_update_pill_renders_all_states_without_overflow_or_overlap() {
     let viewports = [
-        ("narrow_680", Vec2::new(680.0, 540.0)),
-        ("medium_960", Vec2::new(960.0, 640.0)),
-        ("desktop_1280", Vec2::new(1280.0, 800.0)),
+        ("min_640x520", Vec2::new(640.0, 520.0)),
+        ("narrow_820x680", Vec2::new(820.0, 680.0)),
+        ("default_1040x680", Vec2::new(1040.0, 680.0)),
+        ("wide_1440x860", Vec2::new(1440.0, 860.0)),
     ];
 
-    let sample_candidate = UpdateCandidate {
+    let download_candidate = UpdateCandidate {
         version: "3.0.2".to_string(),
         release_url: "https://github.com/raditted/Polban-Auto-Absen-rs/releases/tag/v3.0.2"
             .to_string(),
@@ -824,136 +882,347 @@ fn header_update_pill_renders_all_states_without_overflow_or_overlap() {
         asset: None,
         sha256sums_url: None,
     };
+    let open_page_candidate = UpdateCandidate {
+        strategy: AssetStrategy::OpenReleasePage,
+        ..download_candidate.clone()
+    };
 
-    for (vp_name, size) in viewports {
-        let ctx = egui::Context::default();
-        let mut app = DesktopApp::new_headless(
-            &ctx,
-            configured_prefs(ThemePreference::Light),
-            Box::new(MemoryFallbackStore::new()),
-        );
-        app.set_test_snapshot(Some(sample_populated_snapshot()));
+    for theme in [ThemePreference::Light, ThemePreference::Dark] {
+        for (vp_name, size) in viewports {
+            let vp_label = format!("{vp_name}_{theme:?}");
+            let ctx = egui::Context::default();
+            ctx.style_mut(|s| s.interaction.tooltip_delay = 0.0);
+            let mut app = DesktopApp::new_headless(
+                &ctx,
+                configured_prefs(theme),
+                Box::new(MemoryFallbackStore::new()),
+            );
+            app.set_test_snapshot(Some(sample_populated_snapshot()));
 
-        // Idle, Checking, UpToDate must render zero header update clutter.
-        for hidden_status in [
-            UpdateStatus::Idle,
-            UpdateStatus::Checking,
-            UpdateStatus::UpToDate,
-        ] {
-            app.set_update_status_for_test(hidden_status);
-            let out = run_frames(&ctx, &mut app, size, Vec::new());
-            assert_no_horizontal_overflow(&out, size.x, vp_name);
-            let text = collect_rendered_text(&out);
-            assert!(!text.contains("Update v"));
-            assert!(!text.contains("Mengunduh"));
-            assert!(!text.contains("Restart untuk Update"));
-            assert!(!text.contains("Gagal Update"));
+            // Idle, Checking, UpToDate must render zero header update clutter.
+            for hidden_status in [
+                UpdateStatus::Idle,
+                UpdateStatus::Checking,
+                UpdateStatus::UpToDate,
+            ] {
+                app.set_update_status_for_test(hidden_status);
+                let out = run_frames(&ctx, &mut app, size, Vec::new());
+                assert_no_horizontal_overflow(&out, size.x, &vp_label);
+                let text = collect_rendered_text(&out);
+                assert!(!text.contains("Update v"));
+                assert!(!text.contains("Mengunduh"));
+                assert!(!text.contains("Memasang"));
+                assert!(!text.contains("Restart untuk Update"));
+                assert!(!text.contains("Gagal Update"));
+            }
+
+            // Available (in-app download strategy) -> Update v3.0.2 + download tooltip
+            app.set_update_status_for_test(UpdateStatus::Available(download_candidate.clone()));
+            let avail_out = run_frames(&ctx, &mut app, size, Vec::new());
+            assert_no_horizontal_overflow(&avail_out, size.x, &vp_label);
+            let avail_rects = collect_text_rects(&avail_out);
+            let pill_rect = find_text_rect(&avail_rects, "Update v3.0.2")
+                .unwrap_or_else(|| panic!("{vp_label} missing Update v3.0.2 pill"));
+            let stop_rect = find_text_rect(&avail_rects, "Hentikan")
+                .unwrap_or_else(|| panic!("{vp_label} missing Hentikan button"));
+            assert!(
+                !pill_rect.intersects(stop_rect),
+                "{vp_label}: update pill {pill_rect:?} overlaps Hentikan {stop_rect:?}"
+            );
+            let avail_hover = run_frames(
+                &ctx,
+                &mut app,
+                size,
+                vec![Event::PointerMoved(pill_rect.center())],
+            );
+            assert_no_horizontal_overflow(&avail_hover, size.x, &format!("{vp_label}_avail_tip"));
+            assert!(
+                collect_rendered_text(&avail_hover).contains(
+                    "Versi v3.0.2 tersedia. Klik untuk mengunduh pembaruan di latar belakang."
+                ),
+                "{vp_label}: expected background-download tooltip for in-app strategy"
+            );
+            let _ = run_frames(&ctx, &mut app, size, vec![Event::PointerMoved(Pos2::ZERO)]);
+
+            // Available (OpenReleasePage fallback) -> Update v3.0.2 + release-page tooltip
+            app.set_update_status_for_test(UpdateStatus::Available(open_page_candidate.clone()));
+            let open_out = run_frames(&ctx, &mut app, size, Vec::new());
+            assert_no_horizontal_overflow(&open_out, size.x, &vp_label);
+            let open_rects = collect_text_rects(&open_out);
+            let open_pill_rect = find_text_rect(&open_rects, "Update v3.0.2")
+                .unwrap_or_else(|| panic!("{vp_label} missing OpenReleasePage Update v3.0.2 pill"));
+            let open_stop_rect = find_text_rect(&open_rects, "Hentikan")
+                .unwrap_or_else(|| panic!("{vp_label} missing Hentikan button"));
+            assert!(!open_pill_rect.intersects(open_stop_rect));
+            let open_hover = run_frames(
+                &ctx,
+                &mut app,
+                size,
+                vec![Event::PointerMoved(open_pill_rect.center())],
+            );
+            assert_no_horizontal_overflow(&open_hover, size.x, &format!("{vp_label}_open_tip"));
+            assert!(
+                collect_rendered_text(&open_hover)
+                    .contains("Versi v3.0.2 tersedia. Klik untuk membuka halaman rilis."),
+                "{vp_label}: expected OpenReleasePage tooltip"
+            );
+            let _ = run_frames(&ctx, &mut app, size, vec![Event::PointerMoved(Pos2::ZERO)]);
+
+            // Downloading 42%
+            app.set_update_status_for_test(UpdateStatus::Downloading {
+                version: "3.0.2".to_string(),
+                progress_pct: Some(42),
+                verifying: false,
+            });
+            let dl_out = run_frames(&ctx, &mut app, size, Vec::new());
+            assert_no_horizontal_overflow(&dl_out, size.x, &vp_label);
+            let dl_rects = collect_text_rects(&dl_out);
+            let dl_rect = find_text_rect(&dl_rects, "Mengunduh 42%")
+                .unwrap_or_else(|| panic!("{vp_label} missing Mengunduh 42% pill"));
+            let dl_stop = find_text_rect(&dl_rects, "Hentikan")
+                .unwrap_or_else(|| panic!("{vp_label} missing Hentikan button"));
+            assert!(!dl_rect.intersects(dl_stop));
+
+            // Verifying...
+            app.set_update_status_for_test(UpdateStatus::Downloading {
+                version: "3.0.2".to_string(),
+                progress_pct: Some(100),
+                verifying: true,
+            });
+            let ver_out = run_frames(&ctx, &mut app, size, Vec::new());
+            assert_no_horizontal_overflow(&ver_out, size.x, &vp_label);
+            assert!(collect_rendered_text(&ver_out).contains("Memverifikasi..."));
+
+            // ReadyToRestart -> Restart untuk Update
+            app.set_update_status_for_test(UpdateStatus::ReadyToRestart {
+                version: "3.0.2".to_string(),
+                plan: RestartPlan::RunInstaller {
+                    installer_path: std::path::PathBuf::from(
+                        "Polban-Presensi-Setup-Windows-x64.exe",
+                    ),
+                },
+            });
+            let ready_out = run_frames(&ctx, &mut app, size, Vec::new());
+            assert_no_horizontal_overflow(&ready_out, size.x, &vp_label);
+            let ready_rects = collect_text_rects(&ready_out);
+            let restart_rect = find_text_rect(&ready_rects, "Restart untuk Update")
+                .unwrap_or_else(|| panic!("{vp_label} missing Restart untuk Update pill"));
+            let ready_stop_rect = find_text_rect(&ready_rects, "Hentikan")
+                .unwrap_or_else(|| panic!("{vp_label} missing Hentikan button"));
+            assert!(
+                !restart_rect.intersects(ready_stop_rect),
+                "{vp_label}: restart pill {restart_rect:?} overlaps Hentikan {ready_stop_rect:?}"
+            );
+
+            // Installing -> non-interactive blue Memasang... pill + tooltip
+            app.set_update_status_for_test(UpdateStatus::Installing {
+                version: "3.0.2".to_string(),
+            });
+            let inst_out = run_frames(&ctx, &mut app, size, Vec::new());
+            assert_no_horizontal_overflow(&inst_out, size.x, &vp_label);
+            let inst_rects = collect_text_rects(&inst_out);
+            let inst_rect = find_text_rect(&inst_rects, "Memasang...")
+                .unwrap_or_else(|| panic!("{vp_label} missing Memasang... pill"));
+            let inst_stop = find_text_rect(&inst_rects, "Hentikan")
+                .unwrap_or_else(|| panic!("{vp_label} missing Hentikan button"));
+            assert!(
+                !inst_rect.intersects(inst_stop),
+                "{vp_label}: installing pill {inst_rect:?} overlaps Hentikan {inst_stop:?}"
+            );
+            let inst_hover = run_frames(
+                &ctx,
+                &mut app,
+                size,
+                vec![Event::PointerMoved(inst_rect.center())],
+            );
+            assert_no_horizontal_overflow(&inst_hover, size.x, &format!("{vp_label}_inst_tip"));
+            assert!(
+                collect_rendered_text(&inst_hover).contains("Memasang pembaruan v3.0.2..."),
+                "{vp_label}: expected Installing tooltip"
+            );
+            let _ = run_frames(&ctx, &mut app, size, vec![Event::PointerMoved(Pos2::ZERO)]);
+
+            // Failed -> Gagal Update - Coba Lagi
+            app.set_update_status_for_test(UpdateStatus::Failed {
+                message: "Checksum tidak cocok".to_string(),
+                retry_candidate: Some(download_candidate.clone()),
+            });
+            let fail_out = run_frames(&ctx, &mut app, size, Vec::new());
+            assert_no_horizontal_overflow(&fail_out, size.x, &vp_label);
+            let fail_rects = collect_text_rects(&fail_out);
+            let fail_rect = find_text_rect(&fail_rects, "Gagal Update - Coba Lagi")
+                .unwrap_or_else(|| panic!("{vp_label} missing Gagal Update pill"));
+            let fail_stop = find_text_rect(&fail_rects, "Hentikan")
+                .unwrap_or_else(|| panic!("{vp_label} missing Hentikan button"));
+            assert!(!fail_rect.intersects(fail_stop));
         }
-
-        // Available -> Update v3.0.2
-        app.set_update_status_for_test(UpdateStatus::Available(sample_candidate.clone()));
-        let avail_out = run_frames(&ctx, &mut app, size, Vec::new());
-        assert_no_horizontal_overflow(&avail_out, size.x, vp_name);
-        let avail_rects = collect_text_rects(&avail_out);
-        let pill_rect = find_text_rect(&avail_rects, "Update v3.0.2")
-            .unwrap_or_else(|| panic!("{vp_name} missing Update v3.0.2 pill"));
-        let stop_rect = find_text_rect(&avail_rects, "Hentikan")
-            .unwrap_or_else(|| panic!("{vp_name} missing Hentikan button"));
-        assert!(
-            !pill_rect.intersects(stop_rect),
-            "{vp_name}: update pill {pill_rect:?} overlaps Hentikan {stop_rect:?}"
-        );
-
-        // Downloading 42%
-        app.set_update_status_for_test(UpdateStatus::Downloading {
-            version: "3.0.2".to_string(),
-            progress_pct: Some(42),
-            verifying: false,
-        });
-        let dl_out = run_frames(&ctx, &mut app, size, Vec::new());
-        assert_no_horizontal_overflow(&dl_out, size.x, vp_name);
-        assert!(collect_rendered_text(&dl_out).contains("Mengunduh 42%"));
-
-        // Verifying...
-        app.set_update_status_for_test(UpdateStatus::Downloading {
-            version: "3.0.2".to_string(),
-            progress_pct: Some(100),
-            verifying: true,
-        });
-        let ver_out = run_frames(&ctx, &mut app, size, Vec::new());
-        assert_no_horizontal_overflow(&ver_out, size.x, vp_name);
-        assert!(collect_rendered_text(&ver_out).contains("Memverifikasi..."));
-
-        // ReadyToRestart -> Restart untuk Update
-        app.set_update_status_for_test(UpdateStatus::ReadyToRestart {
-            version: "3.0.2".to_string(),
-            plan: RestartPlan::RunInstaller {
-                installer_path: std::path::PathBuf::from("Polban-Presensi-Setup-Windows-x64.exe"),
-            },
-        });
-        let ready_out = run_frames(&ctx, &mut app, size, Vec::new());
-        assert_no_horizontal_overflow(&ready_out, size.x, vp_name);
-        let ready_rects = collect_text_rects(&ready_out);
-        let restart_rect = find_text_rect(&ready_rects, "Restart untuk Update")
-            .unwrap_or_else(|| panic!("{vp_name} missing Restart untuk Update pill"));
-        let ready_stop_rect = find_text_rect(&ready_rects, "Hentikan")
-            .unwrap_or_else(|| panic!("{vp_name} missing Hentikan button"));
-        assert!(
-            !restart_rect.intersects(ready_stop_rect),
-            "{vp_name}: restart pill {restart_rect:?} overlaps Hentikan {ready_stop_rect:?}"
-        );
-
-        // Failed -> Gagal Update - Coba Lagi
-        app.set_update_status_for_test(UpdateStatus::Failed {
-            message: "Checksum tidak cocok".to_string(),
-            retry_candidate: Some(sample_candidate.clone()),
-        });
-        let fail_out = run_frames(&ctx, &mut app, size, Vec::new());
-        assert_no_horizontal_overflow(&fail_out, size.x, vp_name);
-        assert!(collect_rendered_text(&fail_out).contains("Gagal Update - Coba Lagi"));
     }
 }
 
 #[test]
 fn settings_modal_displays_current_version_and_manual_update_check() {
-    let ctx = egui::Context::default();
-    let mut app = DesktopApp::new_headless(
-        &ctx,
-        configured_prefs(ThemePreference::Light),
-        Box::new(MemoryFallbackStore::new()),
-    );
-    app.set_test_snapshot(Some(sample_populated_snapshot()));
-    let size = Vec2::new(960.0, 680.0);
-    let screen_center = Pos2::new(size.x * 0.5, size.y * 0.5);
+    let viewports = [
+        ("min_640x520", Vec2::new(640.0, 520.0)),
+        ("narrow_820x680", Vec2::new(820.0, 680.0)),
+        ("default_1040x680", Vec2::new(1040.0, 680.0)),
+        ("wide_1440x860", Vec2::new(1440.0, 860.0)),
+    ];
 
-    let main_out = run_frames(&ctx, &mut app, size, Vec::new());
-    let settings_btn = find_text_rect(&collect_text_rects(&main_out), "Pengaturan")
-        .expect("expected Pengaturan button");
-    let _ = run_frames(&ctx, &mut app, size, click_at(settings_btn.center()));
-    assert!(app.is_settings_open());
+    let in_app_candidate = UpdateCandidate {
+        version: "9.9.9".to_string(),
+        release_url: "https://github.com/raditted/Polban-Auto-Absen-rs/releases/tag/v9.9.9"
+            .to_string(),
+        strategy: AssetStrategy::LinuxFedoraRpm,
+        asset: None,
+        sha256sums_url: None,
+    };
+    let open_page_candidate = UpdateCandidate {
+        strategy: AssetStrategy::OpenReleasePage,
+        ..in_app_candidate.clone()
+    };
 
-    // Scroll to the bottom of the settings ScrollArea where version and update check live.
-    let mut scrolled_out = run_frames(&ctx, &mut app, size, Vec::new());
-    for _ in 0..4 {
-        scrolled_out = run_frames(
-            &ctx,
-            &mut app,
-            size,
-            vec![
-                Event::PointerMoved(screen_center),
-                Event::MouseWheel {
-                    unit: egui::MouseWheelUnit::Point,
-                    delta: Vec2::new(0.0, -2000.0),
-                    modifiers: Modifiers::NONE,
-                },
-            ],
-        );
+    for theme in [ThemePreference::Light, ThemePreference::Dark] {
+        for (vp_name, size) in viewports {
+            let vp_label = format!("{vp_name}_{theme:?}");
+            let ctx = egui::Context::default();
+            ctx.style_mut(|s| s.interaction.tooltip_delay = 0.0);
+            let mut app = DesktopApp::new_headless(
+                &ctx,
+                configured_prefs(theme),
+                Box::new(MemoryFallbackStore::new()),
+            );
+            app.set_test_snapshot(Some(sample_populated_snapshot()));
+
+            // Open Settings via Ctrl+,
+            let _ = run_frames(
+                &ctx,
+                &mut app,
+                size,
+                vec![Event::Key {
+                    key: Key::Comma,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::COMMAND,
+                }],
+            );
+            assert!(app.is_settings_open());
+
+            let modal_h = (size.y - 48.0).clamp(280.0, 680.0);
+            let safe_top = (size.y - modal_h) * 0.5 + 78.0;
+            let safe_bottom = (size.y + modal_h) * 0.5 - 98.0;
+
+            let _ = scroll_settings_until(&ctx, &mut app, size, 40, -120.0, |rects| {
+                let Some(ver_r) = find_text_rect(rects, "Versi Aplikasi") else {
+                    return false;
+                };
+                let Some(chk_r) = find_text_rect(rects, "Cek Pembaruan") else {
+                    return false;
+                };
+                ver_r.top() >= safe_top && chk_r.bottom() <= safe_bottom
+            });
+            // Settle one extra scroll down so the entire 40px button row clears the footer clip rect.
+            let scrolled_out = run_frames(
+                &ctx,
+                &mut app,
+                size,
+                vec![
+                    Event::PointerMoved(Pos2::new(size.x * 0.5, size.y * 0.5)),
+                    Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: Vec2::new(0.0, -240.0),
+                        modifiers: Modifiers::NONE,
+                    },
+                ],
+            );
+            assert_no_horizontal_overflow(&scrolled_out, size.x, &format!("settings_{vp_label}"));
+            let text = collect_rendered_text(&scrolled_out);
+            assert!(text.contains(&format!("v{CURRENT_VERSION}")));
+            assert!(text.contains("Cek Pembaruan"));
+
+            // Available (in-app) -> Update v9.9.9 + download tooltip
+            app.set_update_status_for_test(UpdateStatus::Available(in_app_candidate.clone()));
+            let avail_out = run_frames(&ctx, &mut app, size, Vec::new());
+            assert_no_horizontal_overflow(
+                &avail_out,
+                size.x,
+                &format!("settings_avail_{vp_label}"),
+            );
+            let avail_rects = collect_text_rects(&avail_out);
+            let chk_rect = find_text_rect(&avail_rects, "Cek Pembaruan")
+                .unwrap_or_else(|| panic!("{vp_label} missing Cek Pembaruan"));
+            let upd_rect = find_rect_near_y(&avail_rects, "Update v9.9.9", chk_rect.center().y)
+                .unwrap_or_else(|| panic!("{vp_label} missing Settings Update v9.9.9"));
+            assert!(!chk_rect.intersects(upd_rect));
+            let avail_hover = run_hover_frames(&ctx, &mut app, size, upd_rect.center());
+            let avail_hover_text = collect_rendered_text(&avail_hover);
+            assert!(
+                avail_hover_text.contains(
+                    "Versi v9.9.9 tersedia. Klik untuk mengunduh pembaruan di latar belakang."
+                ),
+                "{vp_label}: expected Settings background-download tooltip at upd_rect={upd_rect:?} chk_rect={chk_rect:?} safe=({safe_top}..{safe_bottom}), got:\n{avail_hover_text}"
+            );
+            let _ = run_hover_frames(&ctx, &mut app, size, Pos2::ZERO);
+
+            // Available (OpenReleasePage) -> release-page tooltip
+            app.set_update_status_for_test(UpdateStatus::Available(open_page_candidate.clone()));
+            let open_out = run_frames(&ctx, &mut app, size, Vec::new());
+            assert_no_horizontal_overflow(&open_out, size.x, &format!("settings_open_{vp_label}"));
+            let open_rects = collect_text_rects(&open_out);
+            let open_chk = find_text_rect(&open_rects, "Cek Pembaruan").unwrap();
+            let open_upd = find_rect_near_y(&open_rects, "Update v9.9.9", open_chk.center().y)
+                .unwrap_or_else(|| panic!("{vp_label} missing OpenReleasePage Settings button"));
+            assert!(!open_chk.intersects(open_upd));
+            let open_hover = run_hover_frames(&ctx, &mut app, size, open_upd.center());
+            assert!(
+                collect_rendered_text(&open_hover)
+                    .contains("Versi v9.9.9 tersedia. Klik untuk membuka halaman rilis."),
+                "{vp_label}: expected Settings OpenReleasePage tooltip"
+            );
+            let _ = run_hover_frames(&ctx, &mut app, size, Pos2::ZERO);
+
+            // Installing -> disabled Memasang... + Cek Pembaruan also disabled
+            app.set_update_status_for_test(UpdateStatus::Installing {
+                version: "9.9.9".to_string(),
+            });
+            let inst_out = run_frames(&ctx, &mut app, size, Vec::new());
+            assert_no_horizontal_overflow(&inst_out, size.x, &format!("settings_inst_{vp_label}"));
+            let inst_rects = collect_text_rects(&inst_out);
+            let inst_chk = find_text_rect(&inst_rects, "Cek Pembaruan")
+                .unwrap_or_else(|| panic!("{vp_label} missing Cek Pembaruan during Installing"));
+            let inst_btn = find_rect_near_y(&inst_rects, "Memasang...", inst_chk.center().y)
+                .unwrap_or_else(|| panic!("{vp_label} missing disabled Memasang... button"));
+            assert!(!inst_chk.intersects(inst_btn));
+
+            // Clicking Cek Pembaruan while Installing must remain a no-op (button disabled).
+            let after_click = run_frames(&ctx, &mut app, size, click_at(inst_chk.center()));
+            assert!(
+                !collect_rendered_text(&after_click).contains("Memeriksa..."),
+                "{vp_label}: Cek Pembaruan must be disabled while Installing"
+            );
+
+            // Hovering disabled Memasang... shows install tooltip.
+            let inst_hover = run_hover_frames(&ctx, &mut app, size, inst_btn.center());
+            assert!(
+                collect_rendered_text(&inst_hover).contains("Memasang pembaruan v9.9.9..."),
+                "{vp_label}: expected Settings Installing disabled tooltip"
+            );
+            let _ = run_hover_frames(&ctx, &mut app, size, Pos2::ZERO);
+
+            // Failed -> Coba Lagi Update
+            app.set_update_status_for_test(UpdateStatus::Failed {
+                message: "Autentikasi dibatalkan".to_string(),
+                retry_candidate: Some(in_app_candidate.clone()),
+            });
+            let fail_out = run_frames(&ctx, &mut app, size, Vec::new());
+            assert_no_horizontal_overflow(&fail_out, size.x, &format!("settings_fail_{vp_label}"));
+            let fail_rects = collect_text_rects(&fail_out);
+            let fail_chk = find_text_rect(&fail_rects, "Cek Pembaruan").unwrap();
+            let fail_btn = find_rect_near_y(&fail_rects, "Coba Lagi Update", fail_chk.center().y)
+                .unwrap_or_else(|| panic!("{vp_label} missing Coba Lagi Update button"));
+            assert!(!fail_chk.intersects(fail_btn));
+        }
     }
-    assert_no_horizontal_overflow(&scrolled_out, size.x, "settings_update_section");
-
-    let text = collect_rendered_text(&scrolled_out);
-    assert!(text.contains(&format!("v{CURRENT_VERSION}")));
-    assert!(text.contains("Cek Pembaruan"));
 }
 
 #[test]
